@@ -21,8 +21,8 @@ This code can be found in two (mirrored) locations, in [github](https://github.c
  file (*infs.py*) to thurst the readings into an instance on the tango control 
  system.
  
- Usage
- -----
+Usage
+-----
  
  Stand alone use can be made by command line calls of the *infs.py* file:
 ```
