@@ -40,6 +40,9 @@ import array
 import time
 import traceback
 
+MINREADTIME = 0.1
+ANSWERRETRIES = 5
+
 class InfinityMeterSerial(taurus.Logger):
     '''The abstract superclass.
     '''
@@ -135,8 +138,6 @@ class INFSPySerialDevice(INFSTango):
         self.debug("received %s"%(repr(answer)))
         return answer
 
-MINREADTIME = 0.1
-
 class InfinityMeter(taurus.Logger):
     '''Interface class to made the connection transparent and 
        homogeneous access.
@@ -147,8 +148,8 @@ class InfinityMeter(taurus.Logger):
                 'ValleyValue':    'X03',
                 'FilteredValue':  'X04'}
 
-    def __init__(self,serialName,addr='',sleepTime=MINREADTIME,
-                 logLevel=taurus.Logger.Debug):
+    def __init__(self,serialName,
+                 addr='',sleepTime=MINREADTIME,logLevel=taurus.Logger.Info):
         taurus.Logger.__init__(self,"InfinityMeter")
         if serialName.startswith('/dev/tty'):
             #this will connect direct by serial line
@@ -187,15 +188,16 @@ class InfinityMeter(taurus.Logger):
         return self._serial.read()
     
     def _sendAndReceive(self,cmd):
+        self._flush()
         self._write(cmd)
         i = 0
-        while i < 5:
+        while i < ANSWERRETRIES:
             time.sleep(self._sleepTime)
             answer = self._read()
             if len(answer) != 0:
                 break
             i += 1
-        if i == 5:
+        if i == ANSWERRETRIES:
             self.error("Too many null answers to '%s%s'"
                        %(self._address,repr(cmd)[1:-1]))
             raise ValueError("No answer received to '%s%s'"
@@ -209,18 +211,18 @@ class InfinityMeter(taurus.Logger):
             #raise OverflowError("")
             return float('NaN')
         if not answer.startswith(self._address):
-            self.warning("Answer %s is not from the expected address %s."
-                         %(repr(answer),self._address))
+            self.error("Answer %s is not from the expected address %s."
+                       %(repr(answer),self._address))
             return float('NaN')
         command = "%s%s"%(self._address,cmd)
         if not answer.startswith(command):
-            self.warning("Answer %s is not to my question '*%s\\r'."
-                         %(repr(answer),command))
+            self.error("Answer %s is not to my question '*%s\\r'."
+                       %(repr(answer),command))
             return float('NaN')
         else:
             #FIXME: this is no exception protected.
             answer = answer.strip().replace(command,'')
-            #self.debug("Cleaned answer: %s"%(repr(answer)))
+            self.debug("Answer string: %s"%(repr(answer)))
             return float(answer)
     #####
     #---- object methods
@@ -244,22 +246,36 @@ def main():
                       help="Two digit string with the address of the INFS.")
     parser.add_option('-t',"--sleep",type="float",default=MINREADTIME,
                       help="Wait time between write and read operations")
+    parser.add_option('',"--log-level",default="info",
+                      help="Define the logging level to print out. Allowed "\
+                      "values error|warning|info|debug, being info the "\
+                      "default")
+    parser.add_option('-r',"--reads",type='int',default=1,
+                      help="Number of consecutive sets of readings")
     (options, args) = parser.parse_args()
+    logLevel = {'error':taurus.Logger.Error,
+                'warning':taurus.Logger.Warning,
+                'info':taurus.Logger.Info,
+                'debug':taurus.Logger.Debug
+               }[options.log_level.lower()]
     if options.serial != None:
         try:
-            infs = InfinityMeter(options.serial,options.address,options.sleep)
-            infs.open()
-            infs._flush()
-            unfiltered = infs.getUnfilteredValue()
-            peak = infs.getPeakValue()
-            valley = infs.getValleyValue()
-            filtered = infs.getFilteredValue()
-            print("\nUnfiltered Value: %g\n"\
-                    "Peak:             %g\n"\
-                    "Valley:           %g\n"\
-                    "Filtered:         %g\n"
-                  %(unfiltered,peak,valley,filtered))
-            infs.close()
+            infs = InfinityMeter(options.serial,options.address,
+                                 options.sleep,logLevel)
+            for i in range(1,options.reads+1):
+                infs.open()
+                infs._flush()
+                unfiltered = infs.getUnfilteredValue()
+                peak = infs.getPeakValue()
+                valley = infs.getValleyValue()
+                filtered = infs.getFilteredValue()
+                print("read: %d/%d\n"\
+                      "Unfiltered Value: %g\n"\
+                      "Filtered:         %g\n"\
+                      "Peak:             %g\n"\
+                      "Valley:           %g\n"
+                      %(i,options.reads,unfiltered,filtered,peak,valley))
+                infs.close()
         except Exception,e:
             print("Error testing the Infinity Meter: '%s'"%(e))
             traceback.print_exc()
