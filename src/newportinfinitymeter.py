@@ -82,6 +82,18 @@ class NewportInfinityMeter (PyTango.Device_4Impl):
     
     #####
     #---- #dynattrs segment
+    def addDynAttribute(self,attrName):
+        try:
+            attr = PyTango.Attr(attrName,PyTango.DevDouble,PyTango.READ)
+            readmethod = AttrExc(getattr(self,'read_attr'))
+            aprop = PyTango.UserDefaultAttrProp()
+            aprop.set_format("%6.3f")
+            attr.set_default_properties(aprop)
+            self.add_attribute(attr,r_meth=readmethod)
+        except Exception,e:
+            self.error_stream("The dynamic attribute %s cannot be created "\
+                              "due to: %s"%(name,e))
+    
     @AttrExc
     def read_attr(self, attr):
         attrName = attr.get_name()
@@ -141,9 +153,7 @@ class NewportInfinityMeter (PyTango.Device_4Impl):
             # prepare the dynamic attributes for the requested measures
             self.debug_stream("Preparing the measures: %s"%(self.Measures))
             for measure in self.Measures:
-                attr = PyTango.Attr(measure,PyTango.DevDouble,PyTango.READ)
-                readmethod = AttrExc(getattr(self,'read_attr'))
-                self.add_attribute(attr,r_meth=readmethod)
+                self.addDynAttribute(measure)
         except Exception,e:
             self.error_stream("Device cannot be initialised!")
             traceback.print_exc()

@@ -6,8 +6,8 @@ instrument](http://www.newportus.com/ppt/INFS.html) to measure strain gage.
 It would be extended to other instruments from the same series that have the 
 same way to control.
 
-This code can be found in two (mirrored) locations, in [github](https://github.com/srgblnch/NewportInfinityMeter))
- as a repository and in [sourceforge](https://sourceforge.net/p/tango-ds/code/HEAD/tree/DeviceClasses/MeasureInstruments/NewportInfinityMeter/))
+This code can be found in two (mirrored) locations, in [github](https://github.com/srgblnch/NewportInfinityMeter)
+ as a repository and in [sourceforge](https://sourceforge.net/p/tango-ds/code/HEAD/tree/DeviceClasses/MeasureInstruments/NewportInfinityMeter/)
  as a subdirectiory of tango-ds project.
 
  In the *src* directory there is a basic file called *infs.py*. This is the 
@@ -112,3 +112,8 @@ Extend the commands supported to communicate with the instrument.
 
 Test and extend reliability and error messaging using the device status 
 string message.
+
+Qualities to the attributes. Like changing when readings changes above the 
+noise (noise definition required).
+
+Measurement units to the Tango attributes.
