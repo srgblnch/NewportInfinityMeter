@@ -57,6 +57,14 @@ def AttrExc(function):
     functools.update_wrapper(nestedMethod,function)
     return nestedMethod
 
+def latin1(x):
+  return x.decode('utf-8').replace(u'\u2070', u'\u00b0').\
+      replace(u'\u03bc',u'\u00b5').encode('latin1')
+
+CHANGING_THRESHOLD_DEFAULT = 0.01
+CHANGING_THRESHOLD_NAME = "ChangingThreshold"
+CHANGING_THRESHOLD_LABEL = "Quality changing threshold"
+
 #----- PROTECTED REGION END -----#	//	NewportInfinityMeter.additionnal_import
 
 ##############################################################################
@@ -75,13 +83,23 @@ class NewportInfinityMeter (PyTango.Device_4Impl):
 #----- PROTECTED REGION ID(NewportInfinityMeter.global_variables) ENABLED START -----#
     #####
     #---- #state segment
-    def change_state(self,newstate):
+    def change_state(self,newstate,cleanImportantLogs=False):
+        '''This method is like an overload of the set_state, but includes
+           a push event of this attribute.
+        '''
         self.debug_stream("In change_state(%s)"%(str(newstate)))
         if newstate != self.get_state():
             self.set_state(newstate)
             self.push_change_event('State',newstate)
-            self.cleanAllImportantLogs()
+            if cleanImportantLogs:
+                self.cleanAllImportantLogs()
     def addStatusMsg(self,text=None,important=False):
+        '''The tango Status shall be a human readable message of the behaviour 
+           of the device. With this method, text messages can be set in the 
+           status attribute, with the extra feature to allow the device to
+           remember (and maintain in the status message) some part messages,
+           in order to merge them in one output.
+        '''
         self.debug_stream("In %s::addStatusMsg()"%self.get_name())
         if text == None or len(text) == 0:
             status = "The device is in %s state.\n"%(self.get_state())
@@ -108,29 +126,132 @@ class NewportInfinityMeter (PyTango.Device_4Impl):
         if important and not text in self._important_logs:
             self._important_logs.append(text)
     def cleanAllImportantLogs(self):
+        '''With the feature of remember past messages to the status text 
+           collection, it shall be also a way to clean up them.
+        '''
         self.debug_stream("In %s::cleanAllImportantLogs()"%self.get_name())
         self._important_logs = []
         self.addStatusMsg("")
+        
+    def statusCallback(self,msgType,msgText):
+        '''Used from the instance of the instrument to report a communication 
+           issue with the instrument.
+           Message types are from Logger:
+           - Error: fault state, clean important logs and place the new one,
+           - Warning: alarm state and important log in the status,
+           - Info: add as non important the text in the status.
+        '''
+        if msgType == Logger.Error:
+            self.change_state(PyTango.DevState.FAULT,cleanImportantLogs=True)
+            important = True
+        elif msgType == Logger.Warning:
+            self.change_state(PyTango.DevState.ALARM)
+            important = True
+        else:
+            important = False
+        self.addStatusMsg(msgText,important)
     #---- done state segment
     
     #####
     #---- #dynattrs segment
     def addDynAttribute(self,attrName):
+        '''Based on the elements listed in the property Measures, each of them
+           will pass throw this method to build dynamic tango attributes for
+           this device and configure them in the same way with events.
+        '''
         try:
+            #Prepare a previous value record
+            self._measuredValues[attrName] = None
+            #Prepare the tango attribute
             attr = PyTango.Attr(attrName,PyTango.DevDouble,PyTango.READ)
             readmethod = AttrExc(getattr(self,'read_attr'))
             aprop = PyTango.UserDefaultAttrProp()
             aprop.set_format("%6.3f")
             attr.set_default_properties(aprop)
+            #Insert this new attribute to the current device
             self.add_attribute(attr,r_meth=readmethod)
+            #Stablish events for this attribute
+            self.set_change_event(attrName,True,False)
+            #subscribe it to have periodic readings and event emission.
+            self._infs.subscribe(attrName,self.InfsCallback)
+            self.info_stream("Added Dynamic attribute %s"%(attrName))
         except Exception,e:
             self.error_stream("The dynamic attribute %s cannot be created "\
-                              "due to: %s"%(name,e))
+                              "due to: %s"%(attrName,e))
+    
+    def addExpertDynAttributes(self):
+        '''The dynamic attributes that would be created may have different 
+           unitsor value stability. Due to that, two expert attributes will 
+           cometo allow the definition of the string to be set as unit and 
+           the threshold of difference to set quality changing.
+        '''
+        try:
+            threshold = self.addExpertAttribute(CHANGING_THRESHOLD_NAME,
+                                                PyTango.DevDouble,
+                                                CHANGING_THRESHOLD_LABEL)
+            self._expertAttrs[CHANGING_THRESHOLD_NAME] = None
+            self.info_stream("Added Dynamic expert attribute %s"
+                             %(CHANGING_THRESHOLD_NAME))
+        except Exception,e:
+            self.error_stream("The expert dynamic attributes cannot be "\
+                              "created due to: %s"%(e))
+    def addExpertAttribute(self,name,type,label=None):
+        '''builder of expert memorized attributes.
+        '''
+        attr = PyTango.Attr(name,type, PyTango.READ_WRITE)
+        attr.set_memorized()
+        attr.set_disp_level(PyTango.DispLevel.EXPERT)
+        readmethod = AttrExc(getattr(self,'read_expert_attr'))
+        writemethod = AttrExc(getattr(self,'write_expert_attr'))
+        aprop = PyTango.UserDefaultAttrProp()
+        if type == PyTango.DevDouble:
+            aprop.set_format("%6.3f")
+        if label != None:
+            aprop.set_label(latin1(label))
+        attr.set_default_properties(aprop)
+        self.add_attribute(attr,r_meth=readmethod,w_meth=writemethod)
+        return attr
+    
+    def fireEvent(self,attrName,value,quality=PyTango.AttrQuality.ATTR_VALID):
+        '''Like overload the push_change_event to have logging of it.
+        '''
+        timestamp = time.time()
+        self.debug_stream("fireEvent for %s: %g (%s)"%(attrName,value,quality))
+        self.push_change_event(attrName,value,timestamp,quality)
+    
+    def InfsCallback(self,attrName,newValue):
+        '''This method is used as a callback for the instance this device has
+           of the object that manages the communications with the instrument.
+        '''
+        oldValue = self._measuredValues[attrName]
+        quality = self.getAttrQuality(attrName,oldValue,newValue)
+        self.fireEvent(attrName,newValue,quality)
+    
+    def getAttrQuality(self,attrName,oldValue,newValue):
+        '''Given two values (old and new) this method will decide the quality
+           that the attribute shall have to send with the new value.
+        '''
+        if hasattr(self,"_expertAttrs") and \
+                       self._expertAttrs.has_key(CHANGING_THRESHOLD_NAME) and \
+                            self._expertAttrs[CHANGING_THRESHOLD_NAME] != None:
+            threshold = self._expertAttrs[CHANGING_THRESHOLD_NAME]
+        else:
+            threshold = CHANGING_THRESHOLD_DEFAULT
+        if oldValue != None and abs(oldValue-newValue) > threshold:
+            quality = PyTango.AttrQuality.ATTR_CHANGING
+        else:
+            quality = PyTango.AttrQuality.ATTR_VALID
+        return quality
     
     @AttrExc
     def read_attr(self, attr):
+        '''Generic method for dynamic attributes to read each of them. Based on
+           the attribute name, information is requested to the object that
+           manages the communications to the instrument.
+        '''
         attrName = attr.get_name()
-        if not self.get_state() in [PyTango.DevState.ON]:
+        if not self.get_state() in [PyTango.DevState.ON,
+                                    PyTango.DevState.ALARM]:
             attr.set_value_date_quality(float('inf'),time.time(),
                                     PyTango.AttrQuality.ATTR_INVALID)
             return
@@ -141,19 +262,49 @@ class NewportInfinityMeter (PyTango.Device_4Impl):
             #TODO: last todo may have problems if the period is too long. If the 
             #requesting is not stressed it may introduce a new real reading and 
             #push event.
-            value = self._infs._sendAndReceive(self._infs.commands[attrName])
-            attr.set_value_date_quality(value,time.time(),
-                                                PyTango.AttrQuality.ATTR_VALID)
+            oldValue = self._measuredValues[attrName]
+            newValue = self._infs.getValue(attrName)
+            quality = self.getAttrQuality(attrName,oldValue,newValue)
+            value = self._measuredValues[attrName] = newValue
+            attr.set_value_date_quality(value,time.time(),quality)
         except ValueError,e:
-            self.set_state(PyTango.DevState.ALARM)
+            self.change_state(PyTango.DevState.ALARM)
             self.addStatusMsg("%s: %s"%(attrName,e),important=True)
             self.warn_stream("On %s read, ValueError exception: %s"
                              %(attrName,e))
         except Exception,e:
-#            self.set_state(PyTango.DevState.FAULT)
+#            self.change_state(PyTango.DevState.FAULT)
 #            self.addStatusMsg("Critical error accessing the instrument!")
             self.error_stream("On %s read, exception: %s"%(attrName,e))
-        
+    
+    @AttrExc
+    def read_expert_attr(self,attr):
+        '''Generic Get method for the expert attributes.
+        '''
+        attrName = attr.get_name()
+        if not self._expertAttrs.has_key(attrName):
+            if attr.get_type() == PyTango.DevDouble:
+                value = float('inf')
+            elif attr.get_type() == PyTango.DevString:
+                value = ""
+            else:
+                value = None
+            quality = PyTango.AttrQuality.ATTR_INVALID
+        else:
+            value = self._expertAttrs[attrName]
+            quality = PyTango.AttrQuality.ATTR_VALID
+        attr.set_value_date_quality(value,time.time(),quality)
+    
+    @AttrExc
+    def write_expert_attr(self,attr):
+        '''Generic Set method for the expert attributes.
+        '''
+        attrName = attr.get_name()
+        if not self._expertAttrs.has_key(attrName):
+            self._expertAttrs[attrName] = None
+        data=[]
+        attr.get_write_value(data)
+        self._expertAttrs[attrName] = data[0]
     #---- done dynattrs segment
             
 #----- PROTECTED REGION END -----#	//	NewportInfinityMeter.global_variables
@@ -173,6 +324,8 @@ class NewportInfinityMeter (PyTango.Device_4Impl):
         #----- PROTECTED REGION ID(NewportInfinityMeter.delete_device) ENABLED START -----#
         if self.get_state() == PyTango.DevState.ON:
             self.Close()
+            #del self._infs
+            self._infs = None
         #----- PROTECTED REGION END -----#	//	NewportInfinityMeter.delete_device
 
 #------------------------------------------------------------------
@@ -200,12 +353,17 @@ class NewportInfinityMeter (PyTango.Device_4Impl):
                               %(self.Serial))
             self.debug_stream("Instrument addres in the serial line: %s"
                               %(self.Address))
-            self._infs = InfinityMeter(self.Serial,self.Address,logLevel=Logger.Debug)
+            self._infs = None
+            self._infs = InfinityMeter(self.Serial,self.Address,
+                                       logLevel=Logger.Debug)
             self.Open()
             # prepare the dynamic attributes for the requested measures
             self.debug_stream("Preparing the measures: %s"%(self.Measures))
+            self._measuredValues = {}
             for measure in self.Measures:
                 self.addDynAttribute(measure)
+            self._expertAttrs = {}
+            self.addExpertDynAttributes()
         except Exception,e:
             msg = "Device cannot be initialised!"
             self.error_stream(msg)
