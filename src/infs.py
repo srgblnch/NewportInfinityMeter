@@ -39,9 +39,10 @@ import taurus
 import array
 import time
 import traceback
+import threading
 
-MINREADTIME = 0.1
-ANSWERRETRIES = 5
+MINREADTIME = 0.05
+ANSWERRETRIES = 10
 
 class InfinityMeterSerial(taurus.Logger):
     '''The abstract superclass.
@@ -142,19 +143,32 @@ class INFSPySerialDevice(INFSTango):
         self.debug("received %s"%(repr(answer)))
         return answer
 
+MAXSUBSCRIPTORS = 10
+TIMEBETWEENREAD = 0.25
+RECONNECTTHRESHOLD = 10
+RECONNECTDELAY = 1#s
+
+UNFILTERED = 'UnfilteredValue'
+PEAK = 'PeakValue'
+VALLEY = 'ValleyValue'
+FILTERED = 'FilteredValue'
+
 class InfinityMeter(taurus.Logger):
     '''Interface class to made the connection transparent and 
        homogeneous access.
     '''
 
-    commands = {'UnfilteredValue':'X01',
-                'PeakValue':      'X02',
-                'ValleyValue':    'X03',
-                'FilteredValue':  'X04'}
+    commands = {UNFILTERED:'X01',
+                PEAK:      'X02',
+                VALLEY:    'X03',
+                FILTERED:  'X04'}
 
     def __init__(self,serialName,
-                 addr='',sleepTime=MINREADTIME,logLevel=taurus.Logger.Info):
-        taurus.Logger.__init__(self,"InfinityMeter")
+                 addr='',sleepTime=MINREADTIME,statusCallback=None,
+                 logLevel=taurus.Logger.Info):
+        self._name = "INFS%s"%addr
+        taurus.Logger.__init__(self,self._name)
+        threading.currentThread().setName(self._name)
         if serialName.startswith('/dev/tty'):
             #this will connect direct by serial line
             self._serial = INFSSerialDevFile(serialName)
@@ -174,27 +188,94 @@ class InfinityMeter(taurus.Logger):
                                           "the given name %s"%(serialName))
         self._serial.setLogLevel(logLevel)
         self._address = addr
-        if sleepTime>=MINREADTIME:
+        if sleepTime>=TIMEBETWEENREAD:
             self._sleepTime = sleepTime
         else:
             #TODO: trace that
-            self._sleepTime = MINREADTIME
+            self._sleepTime = TIMEBETWEENREAD
+        self._lastRead = None
+        self._statusCallback = statusCallback
+        #threading area for subscriptions
+        self._joinerEvent = threading.Event()#to communicate between threads
+        self._joinerEvent.clear()
+        self._threadLoopCondition = threading.Condition()
+        self._mutex = threading.Lock()
+        self._thread = None
+        self._subscribers = {}
+        self._answers = {}
+        self._identifiers = []
+        #Hackish
+        self._failedReading = 0
+    def __del__(self):
+        '''Before the object destruction, is necessary to stop the 
+           subscription thread.
+        '''
+        self.info("Deleting %s"%self._name)
+        self.close()
+        for id in self._identifiers:
+            self.unsubscribe(id)
+        while self._thread.isAlive():
+            self.info("Waiting monitor thread to finish")
+            try:
+                self._thread.join(1)
+            except RuntimeError,e:
+                self.error("RuntimeError: %s"%(e))
+                break
     def usesTango(self):
         return self._serial.usesTango()
+    def pushStatusCallback(self,msgType,msgText):
+        if self._statusCallback != None:
+            try:
+                self._statusCallback(msgType,msgText)
+            except:
+                self.error("Exception pushing status(%d:%s): %s"
+                           %(msgType,msgText,e))
+        else:
+            self.warning("No callback to push %d:%s"%(msgType,msgText))
 
+    #####
+    #---- #communications
     def open(self):
+        if self._thread != None and self._thread.isAlive() and \
+                                                 not self._joinerEvent.isSet():
+            self.error("Avoiding an Open try! Thread is ")
+        self._thread = threading.Thread(target=self.startThread)
+        self._thread.setName("%sMonitor"%self._name)
         self._serial.open()
+        self._joinerEvent.clear()
+        self._thread.start()
     def close(self):
         self._serial.close()
+        self._joinerEvent.set()
+        self.V()
     def _flush(self):
         self._serial.flush()
     def _write(self,command):
         self._serial.write(self._address,command)
     def _read(self):
         return self._serial.read()
-    
+
+    #TODO: this Semafore usage should be made using a decorator to avoid any 
+    #      forgoten mutex release.
+    def P(self):
+        self.debug("P(mutex)")
+        return self._mutex.acquire()
+    def V(self):
+        self.debug("V(mutex)")
+        self._mutex.release()
+
     def _sendAndReceive(self,cmd):
+        '''Usually a write operation to this instrument is an information 
+           request to it. This method manages the write and the needed read.
+        '''
+        if not self._lastRead == None:
+            diff_t = time.time() - self._lastRead
+            if diff_t < TIMEBETWEENREAD:
+                #When not enough time between reads, wait what's missing
+                time.sleep(TIMEBETWEENREAD - diff_t)
         self._flush()
+        self._lastRead = time.time()
+        self.P()
         self._write(cmd)
         i = 0
         while i < ANSWERRETRIES:
@@ -206,13 +287,38 @@ class InfinityMeter(taurus.Logger):
         if i == ANSWERRETRIES:
             self.error("Too many null answers to '%s%s'"
                        %(self._address,repr(cmd)[1:-1]))
+            #FIXME: this doesn't work fine
+            self._failedReading += 1
+            if self._failedReading >= RECONNECTTHRESHOLD:
+                try:
+                    msg = "Too many failed readings, closing connection "\
+                          "and try to reconnect in %d second."\
+                          %(RECONNECTDELAY)
+                    self.pushStatusCallback(Logger.warning,msg)
+                    self._serial.close()
+                    time.sleep(RECONNECTDELAY)
+                    self._failedReading = 0
+                    self._serial.open()
+                except Exception,e:
+                    msg = "Error in reconnection: %s"%(e)
+                    self.pushStatusCallback(Logger.Error,msg)
+                    self.error(msg)
+            self.V()
             raise ValueError("No answer received to '%s%s'"
                              %(self._address,repr(cmd)[1:-1]))
+        self._failedReading = 0
+        self.V()
         return self._postprocessAnswer(cmd, answer)
     
     def _postprocessAnswer(self,cmd,answer):
+        '''An answer received from the instrument shall be review because it 
+           can come from a different request, or reports an overflow in the 
+           instrument, or simply the answer is not complete.
+        '''
         if answer.count('?'):
-            # IN CASE OF OVERFLOW, THE ANSWER IS: '0_X0_?+999999\r'
+            # IN CASE OF OVERFLOW, THE ANSWER IS: 
+            # '0_X0_?+999999\r'
+            #Also saw messages like '01?43\r'
             self.warning("Received an overflow answer: %s"%(repr(answer)))
             #raise OverflowError("")
             return float('NaN')
@@ -230,17 +336,133 @@ class InfinityMeter(taurus.Logger):
             answer = answer.strip().replace(command,'')
             self.debug("Answer string: %s"%(repr(answer)))
             return float(answer)
+    #---- done communications
     #####
-    #---- object methods
     
+    #####
+    #---- # object methods
+    def getValue(self,cmd):
+        if self._answers.has_key(cmd):
+            if self._answers[cmd] == None:
+                self.warning("There are subscriptors for %s, "\
+                             "but nothing read yet!"%(cmd))
+                self._answers[cmd] = self._sendAndReceive(self.commands[cmd])
+            return self._answers[cmd]
+        #If there is no subscriptors do the request
+        self.debug("No subscriptor for %s, force send&receive."%(cmd))
+        return self._sendAndReceive(self.commands[cmd])
     def getUnfilteredValue(self):
-        return self._sendAndReceive(self.commands['UnfilteredValue'])
+        return self.getValue(UNFILTERED)
     def getPeakValue(self):
-        return self._sendAndReceive(self.commands['PeakValue'])
+        return self.getValue(PEAK)
     def getValleyValue(self):
-        return self._sendAndReceive(self.commands['ValleyValue'])
+        return self.getValue(VALLEY)
     def getFilteredValue(self):
-        return self._sendAndReceive(self.commands['FilteredValue'])
+        return self.getValue(FILTERED)
+    #---- done object methods
+    #####
+    
+    #####
+    #---- # Subscription
+    def subscribe(self,command,callback=None):
+        '''With this method a class that has an instance of this one, will have
+           a subscription identifier in the return value to manage 
+           unsubscriptions.
+           The input parameters describe to which of the available commands
+           will be subscribed and what has to be called to pass the answer.
+           This callback function will contain, as a parameter, the value.
+        '''
+        self._threadLoopCondition.acquire()
+        try:
+            id = self.bookNewIdentifier()
+        except Exception,e:
+            #release if there is no more subscriptions available and rethrow
+            self._threadLoopCondition.release()
+            raise e
+        if not command in self.commands.keys():
+            raise LookupError("Unrecognized command %s"%(command))
+        if not self._answers.has_key(command):
+            #This mean that there are no subscribers yet
+            self._answers[command] = None
+            if not self._subscribers.has_key(command):
+                self._subscribers[command] = {}
+        self._subscribers[command][id] = callback
+        self._threadLoopCondition.notifyAll()
+        self._threadLoopCondition.release()
+        self.info("New subscription (%s) to %s"%(id,command))
+        return id
+    
+    def unsubscribe(self,id):
+        '''As a counter-method for the subscription it shall be possible of a
+           subscriber to report that no information is needed any more.
+        '''
+        if not self._identifiers.count(id):
+            raise LookupError("Not recognized %d identifier"%(id))
+        if len(self._subscribers.keys()) > 0:
+            self._threadLoopCondition.acquire()
+            for cmd in self._subscribers.keys():
+                if self._subscribers[cmd].has_key(id):
+                    self._subscribers[cmd].pop(id)
+                    if len(self._subscribers[cmd].keys()) == 0:
+                        self._answers.pop(cmd)
+                    self._threadLoopCondition.notifyAll()
+                    break
+            try:
+                self._identifiers.pop(self._identifiers.index(id))
+            except ValueError,e:
+                self.warn("When unsubscribing exception: %s"%e)
+            else:
+                self.info("Unsubscription for %d"%(id))
+            self._threadLoopCondition.release()
+        #FIXME: if there are no more subscriptors, may signal the thread to rest
+    
+    def bookNewIdentifier(self):
+        '''This shall grant a unique identifier to a new subscriber and 
+           internally store the information about identifiers already in use.
+        '''
+        i = 0
+        while self._identifiers.count(i):
+            i += 1
+        if i >= MAXSUBSCRIPTORS:
+            raise ValueError("No more subscription slots available")
+        self._identifiers.append(i)
+        self._identifiers.sort()
+        return i
+    
+    def startThread(self):
+        '''This method is used for the periodic monitor the elements to be
+           read from the instrument, store the new values correctly and call 
+           the subscribers if they have provided a callback function.
+        '''
+        if not hasattr(self,'_joinerEvent'):
+            raise Exception("Not possible to start the loop because "\
+                            "it have not end condition")
+        while not self._joinerEvent.isSet():
+            self._threadLoopCondition.acquire()
+            try:
+                if len(self._identifiers) == 0:
+                    self.debug("No one subscribed, passive sleep")
+                    self._threadLoopCondition.wait()
+                for command in self._answers:
+                    #FIXME: can the readings be concatenated?
+                    self._answers[command] = \
+                                   self._sendAndReceive(self.commands[command])
+                for command in self._subscribers:
+                    if self._answers.has_key(command):
+                        for id in self._subscribers[command]:
+                            cb = self._subscribers[command][id]
+                            if cb != None:
+                                try:
+                                    cb(command,self._answers[command])
+                                except Exception,e:
+                                    self.error("Callback exception for "\
+                                               "id %d: %s"%(id,e))
+            except Exception,e:
+                self.error("Thread exception: %s"%(e))#FIXME:
+            self._threadLoopCondition.release()
+        self.info("Ending %s thread"%(threading.currentThread().getName()))
+    #---- done Subscription
+    #####
 
 def main():
     from optparse import OptionParser
@@ -276,10 +498,10 @@ def main():
                 valley = infs.getValleyValue()
                 filtered = infs.getFilteredValue()
                 print("read: %d/%d\n"\
-                      "Unfiltered Value: %g\n"\
-                      "Filtered:         %g\n"\
-                      "Peak:             %g\n"\
-                      "Valley:           %g\n"
+                      "Unfiltered: %g\n"\
+                      "Filtered:   %g\n"\
+                      "Peak:       %g\n"\
+                      "Valley:     %g\n"
                       %(i,options.reads,unfiltered,filtered,peak,valley))
                 infs.close()
         except Exception,e:
