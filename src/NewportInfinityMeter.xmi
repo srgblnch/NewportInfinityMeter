@@ -52,6 +52,9 @@
         <type xsi:type="pogoDsl:VoidType"/>
       </argout>
       <status abstract="false" inherited="false" concrete="true" concreteHere="true"/>
+      <excludedStates>INIT</excludedStates>
+      <excludedStates>ON</excludedStates>
+      <excludedStates>FAULT</excludedStates>
     </commands>
     <commands name="Close" description="Close the communications with the lower level serial line." execMethod="close" displayLevel="OPERATOR" polledPeriod="0">
       <argin description="">
@@ -61,14 +64,23 @@
         <type xsi:type="pogoDsl:VoidType"/>
       </argout>
       <status abstract="false" inherited="false" concrete="true" concreteHere="true"/>
+      <excludedStates>INIT</excludedStates>
+      <excludedStates>OFF</excludedStates>
+      <excludedStates>FAULT</excludedStates>
     </commands>
-    <states name="INIT" description="">
+    <states name="INIT" description="Starting the device agent.">
       <status abstract="false" inherited="false" concrete="true" concreteHere="true"/>
     </states>
-    <states name="ON" description="">
+    <states name="ON" description="Well made connetion to the instrument.">
       <status abstract="false" inherited="false" concrete="true" concreteHere="true"/>
     </states>
-    <states name="OFF" description="">
+    <states name="OFF" description="Not build connection to the instrument.">
+      <status abstract="false" inherited="false" concrete="true" concreteHere="true"/>
+    </states>
+    <states name="ALARM" description="Something is not working properly.">
+      <status abstract="false" inherited="false" concrete="true" concreteHere="true"/>
+    </states>
+    <states name="FAULT" description="There is something that cannot be recovered.">
       <status abstract="false" inherited="false" concrete="true" concreteHere="true"/>
     </states>
     <preferences docHome="./doc_html" makefileHome="$(TANGO_HOME)"/>

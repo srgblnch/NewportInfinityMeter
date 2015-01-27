@@ -392,8 +392,8 @@
 	</tr>
 <Tr BGCOLOR="#CCCCFF"><Td><Hr></Td><Td><Hr></Td><Td><Hr></Td></Tr>
 	<tr>
-		<td> Command allowed for </td>
-		<td> All states </td>
+		<td> Command NOT allowed for </td>
+		<td> <font size="-1">  <li> INIT </li>  <li> ON </li>  <li> FAULT </li> </font> </td>
 		<td> .. </td>
 	</tr>
 </table>
@@ -441,8 +441,8 @@
 	</tr>
 <Tr BGCOLOR="#CCCCFF"><Td><Hr></Td><Td><Hr></Td><Td><Hr></Td></Tr>
 	<tr>
-		<td> Command allowed for </td>
-		<td> All states </td>
+		<td> Command NOT allowed for </td>
+		<td> <font size="-1">  <li> INIT </li>  <li> OFF </li>  <li> FAULT </li> </font> </td>
 		<td> .. </td>
 	</tr>
 </table>
@@ -470,15 +470,23 @@
 	</tr>
 	<tr>
 		<td> INIT </td>
-		<td>  </td>
+		<td> Starting the device agent. </td>
 	</tr>
 	<tr>
 		<td> ON </td>
-		<td>  </td>
+		<td> Well made connetion to the instrument. </td>
 	</tr>
 	<tr>
 		<td> OFF </td>
-		<td>  </td>
+		<td> Not build connection to the instrument. </td>
+	</tr>
+	<tr>
+		<td> ALARM </td>
+		<td> Something is not working properly. </td>
+	</tr>
+	<tr>
+		<td> FAULT </td>
+		<td> There is something that cannot be recovered. </td>
 	</tr>
 </table>
 </body>
