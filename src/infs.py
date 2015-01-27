@@ -56,6 +56,8 @@ class INFSSerialDevFile(InfinityMeterSerial):
         InfinityMeterSerial.__init__(self)
         self._fileName =fileName
         self._file = None
+    def usesTango(self):
+        return False
     def open(self):
         self._file = open(self._fileName,'r+')#Read and write
     def close(self):
@@ -84,6 +86,8 @@ class INFSTango(InfinityMeterSerial):
     def __init__(self,proxy):
         InfinityMeterSerial.__init__(self)
         self._proxy = proxy
+    def usesTango(self):
+        return True
 
 class INFSSerialDevice(INFSTango):
     '''Class to manage the communications using a Tango device 
@@ -175,6 +179,8 @@ class InfinityMeter(taurus.Logger):
         else:
             #TODO: trace that
             self._sleepTime = MINREADTIME
+    def usesTango(self):
+        return self._serial.usesTango()
 
     def open(self):
         self._serial.open()

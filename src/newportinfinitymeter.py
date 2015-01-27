@@ -62,9 +62,11 @@ def AttrExc(function):
 ##############################################################################
 ## Device States Description
 ##
-## INIT : 
-## ON : 
-## OFF : 
+## INIT : Starting the device agent.
+## ON : Well made connetion to the instrument.
+## OFF : Not build connection to the instrument.
+## ALARM : Something is not working properly.
+## FAULT : There is something that cannot be recovered.
 ##############################################################################
 
 class NewportInfinityMeter (PyTango.Device_4Impl):
@@ -78,6 +80,37 @@ class NewportInfinityMeter (PyTango.Device_4Impl):
         if newstate != self.get_state():
             self.set_state(newstate)
             self.push_change_event('State',newstate)
+            self.cleanAllImportantLogs()
+    def addStatusMsg(self,text=None,important=False):
+        self.debug_stream("In %s::addStatusMsg()"%self.get_name())
+        if text == None or len(text) == 0:
+            status = "The device is in %s state.\n"%(self.get_state())
+        else:
+            if not text in self._important_logs:
+                status = "%s\n"%(text)
+            else:
+                status = ""
+        if not hasattr(self,'_infs') or self._infs == None:
+            status = "%sThere is not connection to the instrument!\n"%(status)
+        elif self._infs.usesTango():
+            try:
+                status = "%sThe PySerial is in %s state.\n"\
+                %(status,self._infs._proxy.State())
+            except Exception,e:
+                status = "%sThe PySerial is not available...\n"%(status)
+                self.error_stream("Error getting information about the "\
+                                  "state of the underlever device proxy: "\
+                                  "%s"%(e))
+        for ilog in self._important_logs:
+            status = "%s%s\n"%(status,ilog)
+        self.set_status(status)
+        self.push_change_event('Status',status)
+        if important and not text in self._important_logs:
+            self._important_logs.append(text)
+    def cleanAllImportantLogs(self):
+        self.debug_stream("In %s::cleanAllImportantLogs()"%self.get_name())
+        self._important_logs = []
+        self.addStatusMsg("")
     #---- done state segment
     
     #####
@@ -97,15 +130,30 @@ class NewportInfinityMeter (PyTango.Device_4Impl):
     @AttrExc
     def read_attr(self, attr):
         attrName = attr.get_name()
-        self.debug_stream("read_attr for %s"%(attrName))
-        value = self._infs._sendAndReceive(self._infs.commands[attrName])
-        #TODO: introduce periodic readings (to emit events) and set value here 
-        #from the cached value.
-        #TODO: last todo may have problems if the period is too long. If the 
-        #requesting is not stressed it may introduce a new real reading and 
-        #push event.
-        attr.set_value_date_quality(value,time.time(),
-                                    PyTango.AttrQuality.ATTR_VALID)
+        if not self.get_state() in [PyTango.DevState.ON]:
+            attr.set_value_date_quality(float('inf'),time.time(),
+                                    PyTango.AttrQuality.ATTR_INVALID)
+            return
+        self.debug_stream("read_%s_attr()"%(attrName))
+        try:
+            #TODO: introduce periodic readings (to emit events) and set value here 
+            #from the cached value.
+            #TODO: last todo may have problems if the period is too long. If the 
+            #requesting is not stressed it may introduce a new real reading and 
+            #push event.
+            value = self._infs._sendAndReceive(self._infs.commands[attrName])
+            attr.set_value_date_quality(value,time.time(),
+                                                PyTango.AttrQuality.ATTR_VALID)
+        except ValueError,e:
+            self.set_state(PyTango.DevState.ALARM)
+            self.addStatusMsg("%s: %s"%(attrName,e),important=True)
+            self.warn_stream("On %s read, ValueError exception: %s"
+                             %(attrName,e))
+        except Exception,e:
+#            self.set_state(PyTango.DevState.FAULT)
+#            self.addStatusMsg("Critical error accessing the instrument!")
+            self.error_stream("On %s read, exception: %s"%(attrName,e))
+        
     #---- done dynattrs segment
             
 #----- PROTECTED REGION END -----#	//	NewportInfinityMeter.global_variables
@@ -134,15 +182,19 @@ class NewportInfinityMeter (PyTango.Device_4Impl):
         self.debug_stream("In " + self.get_name() + ".init_device()")
         self.get_device_properties(self.get_device_class())
         #----- PROTECTED REGION ID(NewportInfinityMeter.init_device) ENABLED START -----#
+        self._infs = None
+        self._important_logs = []
         try:
             self.set_change_event('State',True,False)
             self.set_change_event('Status',True,False)
             self.change_state(PyTango.DevState.INIT)
+            self.addStatusMsg("Initialising the device...")
             # for the Exec command
             self._locals = { 'self' : self }
             self._globals = globals()
             
             self.change_state(PyTango.DevState.OFF)
+            self.addStatusMsg("Ready to connect to the instrument.")
             # prepare the requestor object
             self.debug_stream("Channel for serial line communications: %s"
                               %(self.Serial))
@@ -155,9 +207,12 @@ class NewportInfinityMeter (PyTango.Device_4Impl):
             for measure in self.Measures:
                 self.addDynAttribute(measure)
         except Exception,e:
-            self.error_stream("Device cannot be initialised!")
-            traceback.print_exc()
+            msg = "Device cannot be initialised!"
+            self.error_stream(msg)
             self.change_state(PyTango.DevState.FAULT)
+            self.addStatusMsg(msg+" Check the traces.")
+            traceback.print_exc()
+            
         #----- PROTECTED REGION END -----#	//	NewportInfinityMeter.init_device
 
 #------------------------------------------------------------------
@@ -246,8 +301,17 @@ class NewportInfinityMeter (PyTango.Device_4Impl):
         #----- PROTECTED REGION ID(NewportInfinityMeter.Open) ENABLED START -----#
         self._infs.open()
         self.change_state(PyTango.DevState.ON)
+        self.addStatusMsg("Connected to the instrument.")
         #----- PROTECTED REGION END -----#	//	NewportInfinityMeter.Open
         
+#------------------------------------------------------------------
+#    Is Open command allowed
+#------------------------------------------------------------------
+    def is_Open_allowed(self):
+        self.debug_stream("In " + self.get_name() + ".is_Open_allowed()")
+        return not(self.get_state() in [PyTango.DevState.INIT,
+            PyTango.DevState.ON,
+            PyTango.DevState.FAULT])
 #------------------------------------------------------------------
 #    Close command:
 #------------------------------------------------------------------
@@ -262,8 +326,17 @@ class NewportInfinityMeter (PyTango.Device_4Impl):
         #----- PROTECTED REGION ID(NewportInfinityMeter.Close) ENABLED START -----#
         self._infs.close()
         self.change_state(PyTango.DevState.OFF)
+        self.addStatusMsg("NOT connected to the instrument.")
         #----- PROTECTED REGION END -----#	//	NewportInfinityMeter.Close
         
+#------------------------------------------------------------------
+#    Is Close command allowed
+#------------------------------------------------------------------
+    def is_Close_allowed(self):
+        self.debug_stream("In " + self.get_name() + ".is_Close_allowed()")
+        return not(self.get_state() in [PyTango.DevState.INIT,
+            PyTango.DevState.OFF,
+            PyTango.DevState.FAULT])
 
 #==================================================================
 #
