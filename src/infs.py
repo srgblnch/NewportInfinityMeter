@@ -145,7 +145,7 @@ class INFSPySerialDevice(INFSTango):
 
 MAXSUBSCRIPTORS = 10
 TIMEBETWEENREAD = 0.25
-RECONNECTTHRESHOLD = 10
+RECONNECTTHRESHOLD = 3
 RECONNECTDELAY = 1#s
 
 UNFILTERED = 'UnfilteredValue'
@@ -162,6 +162,13 @@ class InfinityMeter(taurus.Logger):
                 PEAK:      'X02',
                 VALLEY:    'X03',
                 FILTERED:  'X04'}
+    errors = {"43":"Command Error",
+              "46":"Format Error",
+              "48":"Checksum Error",
+              "50":"Parity Error",
+              "4C":"Calibration/Write Lockout Error",
+              "45":"EEPROM Write Lockout Error",
+              "56":"Serial Device Address Error"}
 
     def __init__(self,serialName,
                  addr='',sleepTime=MINREADTIME,statusCallback=None,
@@ -227,7 +234,7 @@ class InfinityMeter(taurus.Logger):
         if self._statusCallback != None:
             try:
                 self._statusCallback(msgType,msgText)
-            except:
+            except Exception,e:
                 self.error("Exception pushing status(%d:%s): %s"
                            %(msgType,msgText,e))
         else:
@@ -247,7 +254,8 @@ class InfinityMeter(taurus.Logger):
     def close(self):
         self._serial.close()
         self._joinerEvent.set()
-        self.V()
+        while not self.P(blocking=False,trace=False):
+            self.V()
     def _flush(self):
         self._serial.flush()
     def _write(self,command):
@@ -257,31 +265,47 @@ class InfinityMeter(taurus.Logger):
 
     #TODO: this Semafore usage should be made using a decorator to avoid any 
     #      forgoten mutex release.
-    def P(self):
-        self.debug("P(mutex)")
-        return self._mutex.acquire()
+    def P(self,blocking=True,trace=True):
+        if trace==True:
+            self.debug("P(mutex) %s"
+                       %("blocking" if blocking else "non blocking"))
+        return self._mutex.acquire(blocking)
     def V(self):
         self.debug("V(mutex)")
         self._mutex.release()
+    def isMutexLocked(self):
+        return self._mutex.locked()
 
-    def _sendAndReceive(self,cmd):
-        '''Usually a write operation to this instrument is an information 
-           request to it. This method manages the write and the needed read.
-        '''
+    def __checklastRead(self):
         if not self._lastRead == None:
             diff_t = time.time() - self._lastRead
             if diff_t < TIMEBETWEENREAD:
                 #When not enough time between reads, wait what's missing
                 time.sleep(TIMEBETWEENREAD - diff_t)
+
+    def _sendAndReceive(self,cmd,blocking=True):
+        '''Usually a write operation to this instrument is an information 
+           request to it. This method manages the write and the needed read.
+        '''
+        self.debug("_sendAndReceive(%s) [Mutex %s]"
+                   %(cmd,"locked" if self.isMutexLocked() else "unlocked"))
+        self.__checklastRead()
         self._flush()
         self._lastRead = time.time()
-        self.P()
+        if not self.P(blocking):
+            self.debug("abort _sendAndReceive()")
+            return float('NaN')
+        if not self._serial.isOpen() or self._joinerEvent.isSet():
+            self.debug("abort _sendAndReceive()")
+            return float('NaN')
         self._write(cmd)
         i = 0
         while i < ANSWERRETRIES:
-            time.sleep(self._sleepTime)
+            time.sleep(self._sleepTime+(self._sleepTime*i*0.1))
             answer = self._read()
             if len(answer) != 0:
+                break
+            if self._joinerEvent.isSet():
                 break
             i += 1
         if i == ANSWERRETRIES:
@@ -289,26 +313,37 @@ class InfinityMeter(taurus.Logger):
                        %(self._address,repr(cmd)[1:-1]))
             #FIXME: this doesn't work fine
             self._failedReading += 1
-            if self._failedReading >= RECONNECTTHRESHOLD:
-                try:
-                    msg = "Too many failed readings, closing connection "\
-                          "and try to reconnect in %d second."\
-                          %(RECONNECTDELAY)
-                    self.pushStatusCallback(Logger.warning,msg)
-                    self._serial.close()
-                    time.sleep(RECONNECTDELAY)
-                    self._failedReading = 0
-                    self._serial.open()
-                except Exception,e:
-                    msg = "Error in reconnection: %s"%(e)
-                    self.pushStatusCallback(Logger.Error,msg)
-                    self.error(msg)
             self.V()
             raise ValueError("No answer received to '%s%s'"
                              %(self._address,repr(cmd)[1:-1]))
         self._failedReading = 0
         self.V()
         return self._postprocessAnswer(cmd, answer)
+
+    def reconnect(self):
+        '''This method disconnects from the instrument and releases the mutex
+           to clean up the queue of requests. After a constant defined time
+           it tries to make a connection again.
+        '''
+        try:
+            msg = "Too many failed readings, closing connection and try "\
+                  "to reconnect in %d second."%(RECONNECTDELAY)
+            self.pushStatusCallback(taurus.Logger.warning,msg)
+            self.warning(msg)
+            self._serial.close()
+            while self.isMutexLocked():#not self.P(blocking=False):
+                self.debug("releasing mutex")
+                self.V()
+            time.sleep(RECONNECTDELAY)
+            self._failedReading = 0
+            self._serial.open()
+            self.pushStatusCallback(taurus.Logger.info,
+                                    "Connected to the instrument.")
+            self.info("reconnected")
+        except Exception,e:
+            msg = "Error in reconnection: %s"%(e)
+            self.pushStatusCallback(taurus.Logger.Error,msg)
+            self.error(msg)
     
     def _postprocessAnswer(self,cmd,answer):
         '''An answer received from the instrument shall be review because it 
@@ -319,17 +354,32 @@ class InfinityMeter(taurus.Logger):
             # IN CASE OF OVERFLOW, THE ANSWER IS: 
             # '0_X0_?+999999\r'
             #Also saw messages like '01?43\r'
-            self.warning("Received an overflow answer: %s"%(repr(answer)))
+            #other errors in dictionary errors
+            errorCode = answer.strip().split('?')[1]
+            if self.errors.has_key(errorCode):
+                self.pushStatusCallback(taurus.Logger.Warning,"Received an "\
+                                        "error %s: %s"%(errorCode,
+                                                  self.errors[errorCode]))
+            if errorCode.startswith('+') or errorCode.startswith('-') and \
+                                           int(errorCode) in [+999999,-999999]:
+                self.pushStatusCallback(taurus.Logger.Warning,"Received an "\
+                                        "overflow answer: %s"%(repr(answer)))
+            else:
+                self.pushStatusCallback(taurus.Logger.Error,"Receiver an "\
+                                        "unknown error code: %s"
+                                        %(repr(answer)))
             #raise OverflowError("")
             return float('NaN')
         if not answer.startswith(self._address):
-            self.error("Answer %s is not from the expected address %s."
-                       %(repr(answer),self._address))
+            self.pushStatusCallback(taurus.Logger.Warning,"Answer %s is not "\
+                                    "from the expected address %s."
+                                    %(repr(answer),self._address))
             return float('NaN')
         command = "%s%s"%(self._address,cmd)
         if not answer.startswith(command):
-            self.error("Answer %s is not to my question '*%s\\r'."
-                       %(repr(answer),command))
+            self.pushStatusCallback(taurus.Logger.Warning,"Answer %s is not "\
+                                   "to my question '*%s\\r'."
+                                   %(repr(answer),command))
             return float('NaN')
         else:
             #FIXME: this is no exception protected.
@@ -346,11 +396,11 @@ class InfinityMeter(taurus.Logger):
             if self._answers[cmd] == None:
                 self.warning("There are subscriptors for %s, "\
                              "but nothing read yet!"%(cmd))
-                self._answers[cmd] = self._sendAndReceive(self.commands[cmd])
+                self._answers[cmd] = float('NaN')
             return self._answers[cmd]
         #If there is no subscriptors do the request
         self.debug("No subscriptor for %s, force send&receive."%(cmd))
-        return self._sendAndReceive(self.commands[cmd])
+        return self._sendAndReceive(self.commands[cmd],blocking=False)
     def getUnfilteredValue(self):
         return self.getValue(UNFILTERED)
     def getPeakValue(self):
@@ -437,6 +487,7 @@ class InfinityMeter(taurus.Logger):
         if not hasattr(self,'_joinerEvent'):
             raise Exception("Not possible to start the loop because "\
                             "it have not end condition")
+        time.sleep(RECONNECTDELAY)
         while not self._joinerEvent.isSet():
             self._threadLoopCondition.acquire()
             try:
@@ -445,24 +496,91 @@ class InfinityMeter(taurus.Logger):
                     self._threadLoopCondition.wait()
                 for command in self._answers:
                     #FIXME: can the readings be concatenated?
-                    self._answers[command] = \
+                    try:
+                        self._answers[command] = \
                                    self._sendAndReceive(self.commands[command])
+                    except ValueError,e:
+                        if self._failedReading >= RECONNECTTHRESHOLD:
+                            self.callcallbacks(command,float('NaN'))
+                            self.reconnect()
+                        self.warning("ValueError from %s: %s"%(command,e))
                 for command in self._subscribers:
                     if self._answers.has_key(command):
-                        for id in self._subscribers[command]:
-                            cb = self._subscribers[command][id]
-                            if cb != None:
-                                try:
-                                    cb(command,self._answers[command])
-                                except Exception,e:
-                                    self.error("Callback exception for "\
-                                               "id %d: %s"%(id,e))
+                        if self._answers[command] != None:
+                            self.callcallbacks(command,self._answers[command])
+                        else:
+                            self.callcallbacks(command,float('NaN'))
             except Exception,e:
                 self.error("Thread exception: %s"%(e))#FIXME:
+                traceback.print_exc()
             self._threadLoopCondition.release()
         self.info("Ending %s thread"%(threading.currentThread().getName()))
+        
+    def callcallbacks(self,command,value):
+        for id in self._subscribers[command]:
+            cb = self._subscribers[command][id]
+            if cb != None:
+                try:
+                    cb(command,value)
+                except Exception,e:
+                    self.error("Callback exception for "\
+                               "id %d: %s"%(id,e))
+        
     #---- done Subscription
     #####
+
+def readAll(infs,n,parallel=False):
+    '''One of the tests is to proceed to read many times all the needed values
+       from the instrument.
+       This shall advise if this feature is not supported!
+    '''
+    for i in range(1,n+1):
+        infs.open()
+        infs._flush()
+        if parallel:
+            address = infs._address
+            concatenation = ""
+            for command in [UNFILTERED,PEAK,VALLEY,FILTERED]:
+                cmd = "*%s%s\r"%(address,infs.commands[command])
+                concatenation = "%s%s"%(concatenation,cmd)
+            print("sending %r"%(concatenation))
+            infs._serial._file.write(cmd)
+            answer = ""
+            j = 0
+            while len(answer) == 0 and j < ANSWERRETRIES:
+                time.sleep(TIMEBETWEENREAD)
+                answer = infs._serial._file.read()
+                j += 1
+            print("%r (%d tries)"%(answer,j))
+            unfiltered = float('nan')
+            peak = float('nan')
+            valley = float('nan')
+            filtered = float('nan')
+            if answer.count("\r") != 0:
+                alist = answer.split('\r')
+                for i,cmd in enumerate([UNFILTERED,PEAK,VALLEY,FILTERED]):
+                    value = infs._postprocessAnswer(infs.commands[cmd],
+                                                    alist[i])
+                    if cmd == UNFILTERED: unfiltered = value
+                    elif cmd == PEAK: peak = value
+                    elif cmd == VALLEY: valley = value
+                    elif cmd == FILTERED: filtered = value
+            else:
+                print("\n\t --- THIS INSTRUMENT DOES NOT SUPPORT "\
+                      "PARALLEL READINGS! ---\n")
+                return
+        else:
+            unfiltered = infs.getUnfilteredValue()
+            peak = infs.getPeakValue()
+            valley = infs.getValleyValue()
+            filtered = infs.getFilteredValue()
+        print("read: %d/%d\n"\
+              "Unfiltered: %g\n"\
+              "Filtered:   %g\n"\
+              "Peak:       %g\n"\
+              "Valley:     %g\n"
+              %(i,n,unfiltered,filtered,peak,valley))
+        infs.close()
 
 def main():
     from optparse import OptionParser
@@ -480,6 +598,8 @@ def main():
                       "default")
     parser.add_option('-r',"--reads",type='int',default=1,
                       help="Number of consecutive sets of readings")
+    parser.add_option('',"--parallel-read",action="store_true",
+                      help="")
     (options, args) = parser.parse_args()
     logLevel = {'error':taurus.Logger.Error,
                 'warning':taurus.Logger.Warning,
@@ -488,26 +608,17 @@ def main():
                }[options.log_level.lower()]
     if options.serial != None:
         try:
-            infs = InfinityMeter(options.serial,options.address,
-                                 options.sleep,logLevel)
-            for i in range(1,options.reads+1):
-                infs.open()
-                infs._flush()
-                unfiltered = infs.getUnfilteredValue()
-                peak = infs.getPeakValue()
-                valley = infs.getValleyValue()
-                filtered = infs.getFilteredValue()
-                print("read: %d/%d\n"\
-                      "Unfiltered: %g\n"\
-                      "Filtered:   %g\n"\
-                      "Peak:       %g\n"\
-                      "Valley:     %g\n"
-                      %(i,options.reads,unfiltered,filtered,peak,valley))
-                infs.close()
+            infs = InfinityMeter(options.serial,
+                                 addr=options.address,
+                                 sleepTime=options.sleep,
+                                 statusCallback=None,
+                                 logLevel=logLevel)
+            readAll(infs,options.reads,options.parallel_read)
         except Exception,e:
             print("Error testing the Infinity Meter: '%s'"%(e))
             traceback.print_exc()
             sys.exit(-1)
+    sys.exit(0)
 
 if __name__ == "__main__":
     '''When this file is called from the command line a test is performed 
