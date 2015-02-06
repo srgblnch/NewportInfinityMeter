@@ -38,6 +38,7 @@ from types import StringType #used for Exec()
 import pprint #used for Exec()
 from infs import InfinityMeter
 import time
+from math import isnan,isinf
 import functools
 import traceback
 from taurus import Logger
@@ -100,7 +101,8 @@ class NewportInfinityMeter (PyTango.Device_4Impl):
            remember (and maintain in the status message) some part messages,
            in order to merge them in one output.
         '''
-        self.debug_stream("In %s::addStatusMsg()"%self.get_name())
+        self.debug_stream("In %s::addStatusMsg(%r,important=%s)"
+                          %(self.get_name(),text,important))
         if text == None or len(text) == 0:
             status = "The device is in %s state.\n"%(self.get_state())
         else:
@@ -139,14 +141,18 @@ class NewportInfinityMeter (PyTango.Device_4Impl):
            Message types are from Logger:
            - Error: fault state, clean important logs and place the new one,
            - Warning: alarm state and important log in the status,
-           - Info: add as non important the text in the status.
+           - Info: clean status to recheck and set the message
+           - Trace: add as non important the text in the status.
         '''
+        self._fromStatusCallback[time.time()] = [msgType,msgText]
         if msgType == Logger.Error:
             self.change_state(PyTango.DevState.FAULT,cleanImportantLogs=True)
             important = True
         elif msgType == Logger.Warning:
             self.change_state(PyTango.DevState.ALARM)
             important = True
+        elif msgType == Logger.Info:
+            self.change_state(PyTango.DevState.ON, cleanImportantLogs=True)
         else:
             important = False
         self.addStatusMsg(msgText,important)
@@ -167,11 +173,14 @@ class NewportInfinityMeter (PyTango.Device_4Impl):
             readmethod = AttrExc(getattr(self,'read_attr'))
             aprop = PyTango.UserDefaultAttrProp()
             aprop.set_format("%6.3f")
+            if type(self.Units) == str:
+                aprop.set_unit(latin1(self.Units))
             attr.set_default_properties(aprop)
             #Insert this new attribute to the current device
             self.add_attribute(attr,r_meth=readmethod)
             #Stablish events for this attribute
             self.set_change_event(attrName,True,False)
+            self.InfsCallback(attrName,float('NaN'))
             #subscribe it to have periodic readings and event emission.
             self._infs.subscribe(attrName,self.InfsCallback)
             self.info_stream("Added Dynamic attribute %s"%(attrName))
@@ -225,23 +234,33 @@ class NewportInfinityMeter (PyTango.Device_4Impl):
         '''
         oldValue = self._measuredValues[attrName]
         quality = self.getAttrQuality(attrName,oldValue,newValue)
+        if self.get_state() != PyTango.DevState.ON and \
+                                not quality in [PyTango.AttrQuality.ATTR_ALARM,
+                                             PyTango.AttrQuality.ATTR_INVALID]:
+            self.change_state(PyTango.DevState.ON, cleanImportantLogs=True)
         self.fireEvent(attrName,newValue,quality)
     
     def getAttrQuality(self,attrName,oldValue,newValue):
         '''Given two values (old and new) this method will decide the quality
            that the attribute shall have to send with the new value.
         '''
+        if isnan(newValue):
+            return PyTango.AttrQuality.ATTR_ALARM
+        if oldValue == None:
+            return PyTango.AttrQuality.ATTR_VALID
+        #check if the user has defined the threshold for CHANGING or we've to
+        #take the default
         if hasattr(self,"_expertAttrs") and \
                        self._expertAttrs.has_key(CHANGING_THRESHOLD_NAME) and \
                             self._expertAttrs[CHANGING_THRESHOLD_NAME] != None:
             threshold = self._expertAttrs[CHANGING_THRESHOLD_NAME]
         else:
             threshold = CHANGING_THRESHOLD_DEFAULT
-        if oldValue != None and abs(oldValue-newValue) > threshold:
-            quality = PyTango.AttrQuality.ATTR_CHANGING
+        #decide what quality corresponds
+        if abs(oldValue-newValue) > threshold:
+            return PyTango.AttrQuality.ATTR_CHANGING
         else:
-            quality = PyTango.AttrQuality.ATTR_VALID
-        return quality
+            return PyTango.AttrQuality.ATTR_VALID
     
     @AttrExc
     def read_attr(self, attr):
@@ -325,6 +344,7 @@ class NewportInfinityMeter (PyTango.Device_4Impl):
         if self.get_state() == PyTango.DevState.ON:
             self.Close()
             #del self._infs
+            self._infs.__del__()
             self._infs = None
         #----- PROTECTED REGION END -----#	//	NewportInfinityMeter.delete_device
 
@@ -355,8 +375,8 @@ class NewportInfinityMeter (PyTango.Device_4Impl):
                               %(self.Address))
             self._infs = None
             self._infs = InfinityMeter(self.Serial,self.Address,
-                                       logLevel=Logger.Debug)
-            self.Open()
+                                       logLevel=Logger.Debug,
+                                       statusCallback=self.statusCallback)
             # prepare the dynamic attributes for the requested measures
             self.debug_stream("Preparing the measures: %s"%(self.Measures))
             self._measuredValues = {}
@@ -364,6 +384,9 @@ class NewportInfinityMeter (PyTango.Device_4Impl):
                 self.addDynAttribute(measure)
             self._expertAttrs = {}
             self.addExpertDynAttributes()
+            #FIXME: remove
+            self._fromStatusCallback = {}
+            self.Open()
         except Exception,e:
             msg = "Device cannot be initialised!"
             self.error_stream(msg)
@@ -521,6 +544,10 @@ class NewportInfinityMeterClass(PyTango.DeviceClass):
         'Measures':
             [PyTango.DevVarStringArray,
             "List of elements to read from the instrument: UnfilteredValue, FilteredValue, PeakValue, ValleyValue.",
+            [] ],
+        'Units':
+            [PyTango.DevString,
+            "Unit to be used in the dynamic attributes",
             [] ],
         }
 
