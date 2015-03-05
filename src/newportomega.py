@@ -6,9 +6,9 @@
 ## license :
 ##============================================================================
 ##
-## File :        NewportInfinityMeter.py
+## File :        NewportOmega.py
 ## 
-## Project :     NewportInfinityMeter
+## Project :     NewportOmega
 ##
 ## $Author :      sblanch$
 ##
@@ -24,19 +24,19 @@
 ##        (c) - Software Engineering Group - ESRF
 ##############################################################################
 
-"""Device server to show the INFinity meter Strain gage from Newport, in a tango system."""
+"""Device server to show the Omega Strain gage from Newport, in a tango system."""
 
-__all__ = ["NewportInfinityMeter", "NewportInfinityMeterClass", "main"]
+__all__ = ["NewportOmega", "NewportOmegaClass", "main"]
 
 __docformat__ = 'restructuredtext'
 
 import PyTango
 import sys
 # Add additional import
-#----- PROTECTED REGION ID(NewportInfinityMeter.additionnal_import) ENABLED START -----#
+#----- PROTECTED REGION ID(NewportOmega.additionnal_import) ENABLED START -----#
 from types import StringType #used for Exec()
 import pprint #used for Exec()
-from infs import InfinityMeter
+from OmegaCommunications import Omega
 import time
 from math import isnan,isinf
 import functools
@@ -66,7 +66,7 @@ CHANGING_THRESHOLD_DEFAULT = 0.01
 CHANGING_THRESHOLD_NAME = "ChangingThreshold"
 CHANGING_THRESHOLD_LABEL = "Quality changing threshold"
 
-#----- PROTECTED REGION END -----#	//	NewportInfinityMeter.additionnal_import
+#----- PROTECTED REGION END -----#	//	NewportOmega.additionnal_import
 
 ##############################################################################
 ## Device States Description
@@ -78,10 +78,10 @@ CHANGING_THRESHOLD_LABEL = "Quality changing threshold"
 ## FAULT : There is something that cannot be recovered.
 ##############################################################################
 
-class NewportInfinityMeter (PyTango.Device_4Impl):
+class NewportOmega (PyTango.Device_4Impl):
 
 #--------- Add you global variables here --------------------------
-#----- PROTECTED REGION ID(NewportInfinityMeter.global_variables) ENABLED START -----#
+#----- PROTECTED REGION ID(NewportOmega.global_variables) ENABLED START -----#
     #####
     #---- #state segment
     def change_state(self,newstate,cleanImportantLogs=False):
@@ -110,12 +110,12 @@ class NewportInfinityMeter (PyTango.Device_4Impl):
                 status = "%s\n"%(text)
             else:
                 status = ""
-        if not hasattr(self,'_infs') or self._infs == None:
+        if not hasattr(self,'_omega') or self._omega == None:
             status = "%sThere is not connection to the instrument!\n"%(status)
-        elif self._infs.usesTango():
+        elif self._omega.usesTango():
             try:
                 status = "%sThe PySerial is in %s state.\n"\
-                %(status,self._infs._proxy.State())
+                %(status,self._omega._proxy.State())
             except Exception,e:
                 status = "%sThe PySerial is not available...\n"%(status)
                 self.error_stream("Error getting information about the "\
@@ -148,7 +148,7 @@ class NewportInfinityMeter (PyTango.Device_4Impl):
         if msgType == Logger.Error:
             self.change_state(PyTango.DevState.FAULT,cleanImportantLogs=True)
             important = True
-            self._infs.unsubscribeAll()
+            self._omega.unsubscribeAll()
         elif msgType == Logger.Warning:
             self.change_state(PyTango.DevState.ALARM)
             important = True
@@ -181,9 +181,9 @@ class NewportInfinityMeter (PyTango.Device_4Impl):
             self.add_attribute(attr,r_meth=readmethod)
             #Stablish events for this attribute
             self.set_change_event(attrName,True,False)
-            self.InfsCallback(attrName,float('NaN'))
+            self.omegaCallback(attrName,float('NaN'))
             #subscribe it to have periodic readings and event emission.
-            self._infs.subscribe(attrName,self.InfsCallback)
+            self._omega.subscribe(attrName,self.omegaCallback)
             self.info_stream("Added Dynamic attribute %s"%(attrName))
         except Exception,e:
             self.error_stream("The dynamic attribute %s cannot be created "\
@@ -229,7 +229,7 @@ class NewportInfinityMeter (PyTango.Device_4Impl):
         self.debug_stream("fireEvent for %s: %g (%s)"%(attrName,value,quality))
         self.push_change_event(attrName,value,timestamp,quality)
     
-    def InfsCallback(self,attrName,newValue):
+    def omegaCallback(self,attrName,newValue):
         '''This method is used as a callback for the instance this device has
            of the object that manages the communications with the instrument.
         '''
@@ -283,7 +283,7 @@ class NewportInfinityMeter (PyTango.Device_4Impl):
             #requesting is not stressed it may introduce a new real reading and 
             #push event.
             oldValue = self._measuredValues[attrName]
-            newValue = self._infs.getValue(attrName)
+            newValue = self._omega.getValue(attrName)
             quality = self.getAttrQuality(attrName,oldValue,newValue)
             value = self._measuredValues[attrName] = newValue
             attr.set_value_date_quality(value,time.time(),quality)
@@ -327,27 +327,27 @@ class NewportInfinityMeter (PyTango.Device_4Impl):
         self._expertAttrs[attrName] = data[0]
     #---- done dynattrs segment
             
-#----- PROTECTED REGION END -----#	//	NewportInfinityMeter.global_variables
+#----- PROTECTED REGION END -----#	//	NewportOmega.global_variables
 #------------------------------------------------------------------
 #    Device constructor
 #------------------------------------------------------------------
     def __init__(self,cl, name):
         PyTango.Device_4Impl.__init__(self,cl,name)
         self.debug_stream("In " + self.get_name() + ".__init__()")
-        NewportInfinityMeter.init_device(self)
+        NewportOmega.init_device(self)
 
 #------------------------------------------------------------------
 #    Device destructor
 #------------------------------------------------------------------
     def delete_device(self):
         self.debug_stream("In " + self.get_name() + ".delete_device()")
-        #----- PROTECTED REGION ID(NewportInfinityMeter.delete_device) ENABLED START -----#
+        #----- PROTECTED REGION ID(NewportOmega.delete_device) ENABLED START -----#
         if self.get_state() == PyTango.DevState.ON:
             self.Close()
-            #del self._infs
-            self._infs.__del__()
-            self._infs = None
-        #----- PROTECTED REGION END -----#	//	NewportInfinityMeter.delete_device
+            #del self._omega
+            self._omega.__del__()
+            self._omega = None
+        #----- PROTECTED REGION END -----#	//	NewportOmega.delete_device
 
 #------------------------------------------------------------------
 #    Device initialization
@@ -355,8 +355,8 @@ class NewportInfinityMeter (PyTango.Device_4Impl):
     def init_device(self):
         self.debug_stream("In " + self.get_name() + ".init_device()")
         self.get_device_properties(self.get_device_class())
-        #----- PROTECTED REGION ID(NewportInfinityMeter.init_device) ENABLED START -----#
-        self._infs = None
+        #----- PROTECTED REGION ID(NewportOmega.init_device) ENABLED START -----#
+        self._omega = None
         self._important_logs = []
         try:
             self.set_change_event('State',True,False)
@@ -374,8 +374,8 @@ class NewportInfinityMeter (PyTango.Device_4Impl):
                               %(self.Serial))
             self.debug_stream("Instrument addres in the serial line: %s"
                               %(self.Address))
-            self._infs = None
-            self._infs = InfinityMeter(self.Serial,self.Address,
+            self._omega = None
+            self._omega = Omega(self.Serial,self.Address,
                                        logLevel=Logger.Debug,
                                        statusCallback=self.statusCallback)
             # prepare the dynamic attributes for the requested measures
@@ -395,20 +395,20 @@ class NewportInfinityMeter (PyTango.Device_4Impl):
             self.addStatusMsg(msg+" Check the traces.")
             traceback.print_exc()
             
-        #----- PROTECTED REGION END -----#	//	NewportInfinityMeter.init_device
+        #----- PROTECTED REGION END -----#	//	NewportOmega.init_device
 
 #------------------------------------------------------------------
 #    Always excuted hook method
 #------------------------------------------------------------------
     def always_executed_hook(self):
         self.debug_stream("In " + self.get_name() + ".always_excuted_hook()")
-        #----- PROTECTED REGION ID(NewportInfinityMeter.always_executed_hook) ENABLED START -----#
+        #----- PROTECTED REGION ID(NewportOmega.always_executed_hook) ENABLED START -----#
         
-        #----- PROTECTED REGION END -----#	//	NewportInfinityMeter.always_executed_hook
+        #----- PROTECTED REGION END -----#	//	NewportOmega.always_executed_hook
 
 #==================================================================
 #
-#    NewportInfinityMeter read/write attribute methods
+#    NewportOmega read/write attribute methods
 #
 #==================================================================
 
@@ -420,14 +420,14 @@ class NewportInfinityMeter (PyTango.Device_4Impl):
 #------------------------------------------------------------------
     def read_attr_hardware(self, data):
         self.debug_stream("In " + self.get_name() + ".read_attr_hardware()")
-        #----- PROTECTED REGION ID(NewportInfinityMeter.read_attr_hardware) ENABLED START -----#
+        #----- PROTECTED REGION ID(NewportOmega.read_attr_hardware) ENABLED START -----#
         
-        #----- PROTECTED REGION END -----#	//	NewportInfinityMeter.read_attr_hardware
+        #----- PROTECTED REGION END -----#	//	NewportOmega.read_attr_hardware
 
 
 #==================================================================
 #
-#    NewportInfinityMeter command methods
+#    NewportOmega command methods
 #
 #==================================================================
 
@@ -443,7 +443,7 @@ class NewportInfinityMeter (PyTango.Device_4Impl):
         :rtype: PyTango.DevString """
         self.debug_stream("In " + self.get_name() +  ".Exec()")
         argout = ''
-        #----- PROTECTED REGION ID(NewportInfinityMeter.Exec) ENABLED START -----#
+        #----- PROTECTED REGION ID(NewportOmega.Exec) ENABLED START -----#
         cmd = argin
         L = self._locals
         G = self._globals
@@ -466,7 +466,7 @@ class NewportInfinityMeter (PyTango.Device_4Impl):
             return "%s!\n%s" % (result.__class__.__name__, str(result))
         else:
             return pprint.pformat(result)
-        #----- PROTECTED REGION END -----#	//	NewportInfinityMeter.Exec
+        #----- PROTECTED REGION END -----#	//	NewportOmega.Exec
         return argout
         
 #------------------------------------------------------------------
@@ -480,11 +480,11 @@ class NewportInfinityMeter (PyTango.Device_4Impl):
         :return: 
         :rtype: PyTango.DevVoid """
         self.debug_stream("In " + self.get_name() +  ".Open()")
-        #----- PROTECTED REGION ID(NewportInfinityMeter.Open) ENABLED START -----#
-        self._infs.open()
+        #----- PROTECTED REGION ID(NewportOmega.Open) ENABLED START -----#
+        self._omega.open()
         self.change_state(PyTango.DevState.ON)
         self.addStatusMsg("Connected to the instrument.")
-        #----- PROTECTED REGION END -----#	//	NewportInfinityMeter.Open
+        #----- PROTECTED REGION END -----#	//	NewportOmega.Open
         
 #------------------------------------------------------------------
 #    Is Open command allowed
@@ -505,11 +505,11 @@ class NewportInfinityMeter (PyTango.Device_4Impl):
         :return: 
         :rtype: PyTango.DevVoid """
         self.debug_stream("In " + self.get_name() +  ".Close()")
-        #----- PROTECTED REGION ID(NewportInfinityMeter.Close) ENABLED START -----#
-        self._infs.close()
+        #----- PROTECTED REGION ID(NewportOmega.Close) ENABLED START -----#
+        self._omega.close()
         self.change_state(PyTango.DevState.OFF)
         self.addStatusMsg("NOT connected to the instrument.")
-        #----- PROTECTED REGION END -----#	//	NewportInfinityMeter.Close
+        #----- PROTECTED REGION END -----#	//	NewportOmega.Close
         
 #------------------------------------------------------------------
 #    Is Close command allowed
@@ -522,10 +522,10 @@ class NewportInfinityMeter (PyTango.Device_4Impl):
 
 #==================================================================
 #
-#    NewportInfinityMeterClass class definition
+#    NewportOmegaClass class definition
 #
 #==================================================================
-class NewportInfinityMeterClass(PyTango.DeviceClass):
+class NewportOmegaClass(PyTango.DeviceClass):
 
     #    Class Properties
     class_property_list = {
@@ -576,22 +576,22 @@ class NewportInfinityMeterClass(PyTango.DeviceClass):
 
 
 #------------------------------------------------------------------
-#    NewportInfinityMeterClass Constructor
+#    NewportOmegaClass Constructor
 #------------------------------------------------------------------
     def __init__(self, name):
         PyTango.DeviceClass.__init__(self, name)
         self.set_type(name);
-        print "In NewportInfinityMeter Class  constructor"
+        print "In NewportOmega Class  constructor"
 
 #==================================================================
 #
-#    NewportInfinityMeter class main method
+#    NewportOmega class main method
 #
 #==================================================================
 def main():
     try:
         py = PyTango.Util(sys.argv)
-        py.add_class(NewportInfinityMeterClass,NewportInfinityMeter,'NewportInfinityMeter')
+        py.add_class(NewportOmegaClass,NewportOmega,'NewportOmega')
 
         U = PyTango.Util.instance()
         U.server_init()
