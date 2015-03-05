@@ -41,9 +41,6 @@ import time
 import traceback
 import threading
 
-MINREADTIME = 0.05
-ANSWERRETRIES = 10
-
 class InfinityMeterSerial(taurus.Logger):
     '''The abstract superclass.
     '''
@@ -144,8 +141,11 @@ class INFSPySerialDevice(INFSTango):
         return answer
 
 MAXSUBSCRIPTORS = 10
-TIMEBETWEENREAD = 0.25
-RECONNECTTHRESHOLD = 3
+MINREADTIME = 0.05
+TIMEBETWEENREAD = 0.5
+ANSWERRETRIES = 10
+RECONNECTTHRESHOLD = 4
+RECONNECTLIMIT = 2
 RECONNECTDELAY = 1#s
 
 UNFILTERED = 'UnfilteredValue'
@@ -195,11 +195,11 @@ class InfinityMeter(taurus.Logger):
                                           "the given name %s"%(serialName))
         self._serial.setLogLevel(logLevel)
         self._address = addr
-        if sleepTime>=TIMEBETWEENREAD:
+        if sleepTime>=MINREADTIME:
             self._sleepTime = sleepTime
         else:
             #TODO: trace that
-            self._sleepTime = TIMEBETWEENREAD
+            self._sleepTime = MINREADTIME
         self._lastRead = None
         self._statusCallback = statusCallback
         #threading area for subscriptions
@@ -213,14 +213,14 @@ class InfinityMeter(taurus.Logger):
         self._identifiers = []
         #Hackish
         self._failedReading = 0
+        self._failedReconnections = 0
     def __del__(self):
         '''Before the object destruction, is necessary to stop the 
            subscription thread.
         '''
         self.info("Deleting %s"%self._name)
         self.close()
-        for id in self._identifiers:
-            self.unsubscribe(id)
+        self.unsubscribeAll()
         while self._thread.isAlive():
             self.info("Waiting monitor thread to finish")
             try:
@@ -280,7 +280,8 @@ class InfinityMeter(taurus.Logger):
         if not self._lastRead == None:
             diff_t = time.time() - self._lastRead
             if diff_t < TIMEBETWEENREAD:
-                #When not enough time between reads, wait what's missing
+                self.debug("Not enough time between reads (%f), wait %f left"
+                           %(diff_t,TIMEBETWEENREAD - diff_t))
                 time.sleep(TIMEBETWEENREAD - diff_t)
 
     def _sendAndReceive(self,cmd,blocking=True):
@@ -309,8 +310,8 @@ class InfinityMeter(taurus.Logger):
                 break
             i += 1
         if i == ANSWERRETRIES:
-            self.error("Too many null answers to '%s%s'"
-                       %(self._address,repr(cmd)[1:-1]))
+            self.error("Too many (%d) null answers to '%s%s'"
+                       %(i,self._address,repr(cmd)[1:-1]))
             #FIXME: this doesn't work fine
             self._failedReading += 1
             self.V()
@@ -327,7 +328,8 @@ class InfinityMeter(taurus.Logger):
         '''
         try:
             msg = "Too many failed readings, closing connection and try "\
-                  "to reconnect in %d second."%(RECONNECTDELAY)
+                  "to reconnect in %d second. (previously %d failed "\
+                  "recoconnections)"%(RECONNECTDELAY,self._failedReconnections)
             self.pushStatusCallback(taurus.Logger.warning,msg)
             self.warning(msg)
             self._serial.close()
@@ -338,7 +340,7 @@ class InfinityMeter(taurus.Logger):
             self._failedReading = 0
             self._serial.open()
             self.pushStatusCallback(taurus.Logger.info,
-                                    "Connected to the instrument.")
+                                    "(re)Connected to the instrument.")
             self.info("reconnected")
         except Exception,e:
             msg = "Error in reconnection: %s"%(e)
@@ -355,30 +357,17 @@ class InfinityMeter(taurus.Logger):
             # '0_X0_?+999999\r'
             #Also saw messages like '01?43\r'
             #other errors in dictionary errors
-            errorCode = answer.strip().split('?')[1]
-            if self.errors.has_key(errorCode):
-                self.pushStatusCallback(taurus.Logger.Warning,"Received an "\
-                                        "error %s: %s"%(errorCode,
-                                                  self.errors[errorCode]))
-            if errorCode.startswith('+') or errorCode.startswith('-') and \
-                                           int(errorCode) in [+999999,-999999]:
-                self.pushStatusCallback(taurus.Logger.Warning,"Received an "\
-                                        "overflow answer: %s"%(repr(answer)))
-            else:
-                self.pushStatusCallback(taurus.Logger.Error,"Receiver an "\
-                                        "unknown error code: %s"
-                                        %(repr(answer)))
-            #raise OverflowError("")
+            self.__interpretErrorCode(answer.strip().split('?')[1])
             return float('NaN')
+        command = "%s%s"%(self._address,cmd)
         if not answer.startswith(self._address):
             self.pushStatusCallback(taurus.Logger.Warning,"Answer %s is not "\
                                     "from the expected address %s."
                                     %(repr(answer),self._address))
             return float('NaN')
-        command = "%s%s"%(self._address,cmd)
-        if not answer.startswith(command):
+        elif not answer.startswith(command):
             self.pushStatusCallback(taurus.Logger.Warning,"Answer %s is not "\
-                                   "to my question '*%s\\r'."
+                                   "for the question '*%s\\r'."
                                    %(repr(answer),command))
             return float('NaN')
         else:
@@ -386,6 +375,22 @@ class InfinityMeter(taurus.Logger):
             answer = answer.strip().replace(command,'')
             self.debug("Answer string: %s"%(repr(answer)))
             return float(answer)
+    
+    def __interpretErrorCode(self,errorCode):
+        '''
+        '''
+        if self.errors.has_key(errorCode):
+            self.pushStatusCallback(taurus.Logger.Warning,"Received an "\
+                                    "error %s: %s"%(errorCode,
+                                              self.errors[errorCode]))
+        elif errorCode.startswith('+') or errorCode.startswith('-') and \
+                                       int(errorCode) in [+999999,-999999]:
+            self.pushStatusCallback(taurus.Logger.Warning,"Received an "\
+                                    "overflow answer: %s"%(repr(answer)))
+        else:
+            self.pushStatusCallback(taurus.Logger.Warning,"Receiver an "\
+                                    "unknown error code: %s"
+                                    %(repr(answer)))
     #---- done communications
     #####
     
@@ -466,6 +471,10 @@ class InfinityMeter(taurus.Logger):
             self._threadLoopCondition.release()
         #FIXME: if there are no more subscriptors, may signal the thread to rest
     
+    def unsubscribeAll(self):
+        for id in self._identifiers:
+            self.unsubscribe(id)
+    
     def bookNewIdentifier(self):
         '''This shall grant a unique identifier to a new subscriber and 
            internally store the information about identifiers already in use.
@@ -500,23 +509,39 @@ class InfinityMeter(taurus.Logger):
                         self._answers[command] = \
                                    self._sendAndReceive(self.commands[command])
                     except ValueError,e:
-                        if self._failedReading >= RECONNECTTHRESHOLD:
-                            self.callcallbacks(command,float('NaN'))
-                            self.reconnect()
                         self.warning("ValueError from %s: %s"%(command,e))
+                        if self._failedReading >= RECONNECTTHRESHOLD:
+                            self.reconnect()
+                            #check if the reconnection has succeed
+                            try:
+                                self._answers[command] = \
+                                   self._sendAndReceive(self.commands[command])
+                            except:
+                                self._failedReconnections += 1
+                                self.callthecallbacks(command,float('NaN'))
+                            else:
+                                self._failedReconnections = 0
+                                msg = "Connected to the instrument."
+                                self.pushStatusCallback(taurus.Logger.Info,msg)
+                        if self._failedReconnections >= RECONNECTLIMIT:
+                            msg = "reach %d consecutive reconnections "\
+                                  "failed: no more tries (review and Init())"\
+                                  %(self._failedReconnections)
+                            self.pushStatusCallback(taurus.Logger.Error,msg)
                 for command in self._subscribers:
                     if self._answers.has_key(command):
                         if self._answers[command] != None:
-                            self.callcallbacks(command,self._answers[command])
+                            self.callthecallbacks(command,\
+                                                        self._answers[command])
                         else:
-                            self.callcallbacks(command,float('NaN'))
+                            self.callthecallbacks(command,float('NaN'))
             except Exception,e:
                 self.error("Thread exception: %s"%(e))#FIXME:
                 traceback.print_exc()
             self._threadLoopCondition.release()
         self.info("Ending %s thread"%(threading.currentThread().getName()))
         
-    def callcallbacks(self,command,value):
+    def callthecallbacks(self,command,value):
         for id in self._subscribers[command]:
             cb = self._subscribers[command][id]
             if cb != None:

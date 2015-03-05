@@ -92,8 +92,8 @@ class NewportInfinityMeter (PyTango.Device_4Impl):
         if newstate != self.get_state():
             self.set_state(newstate)
             self.push_change_event('State',newstate)
-            if cleanImportantLogs:
-                self.cleanAllImportantLogs()
+        if cleanImportantLogs:
+            self.cleanAllImportantLogs()
     def addStatusMsg(self,text=None,important=False):
         '''The tango Status shall be a human readable message of the behaviour 
            of the device. With this method, text messages can be set in the 
@@ -148,6 +148,7 @@ class NewportInfinityMeter (PyTango.Device_4Impl):
         if msgType == Logger.Error:
             self.change_state(PyTango.DevState.FAULT,cleanImportantLogs=True)
             important = True
+            self._infs.unsubscribeAll()
         elif msgType == Logger.Warning:
             self.change_state(PyTango.DevState.ALARM)
             important = True
