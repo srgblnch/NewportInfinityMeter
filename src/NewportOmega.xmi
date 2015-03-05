@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="ASCII"?>
 <pogoDsl:PogoSystem xmi:version="2.0" xmlns:xmi="http://www.omg.org/XMI" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:pogoDsl="http://www.esrf.fr/tango/pogo/PogoDsl">
-  <classes name="NewportInfinityMeter" pogoRevision="8.1">
-    <description description="Device server to show the INFinity meter Strain gage from Newport, in a tango system." title="NewportInfinityMeter" sourcePath="/home/serguei/src/Laop/NewportInfinityMeter/src" language="Python" filestogenerate="XMI   file,Code files,html Pages" hasMandatoryProperty="true" hasConcreteProperty="true" hasAbstractCommand="false" hasAbstractAttribute="false" descriptionHtmlExists="false">
+  <classes name="NewportOmega" pogoRevision="8.1">
+    <description description="Device server to show the Omega Strain gage from Newport, in a tango system." title="NewportOmega" sourcePath="/home/serguei/src/Laop/NewportOmega/src" language="Python" filestogenerate="XMI   file,Code files,html Pages" hasMandatoryProperty="true" hasConcreteProperty="true" hasAbstractCommand="false" hasAbstractAttribute="false" descriptionHtmlExists="false">
       <inheritances classname="Device_Impl" sourcePath=""/>
-      <identification contact="at cells.es - sblanch" author="sblanch" emailDomain="cells.es" classFamily="Instrumentation" siteSpecific="" platform="Unix Like" bus="Serial Line" manufacturer="Newport" reference="INFS"/>
+      <identification contact="at cells.es - sblanch" author="sblanch" emailDomain="cells.es" classFamily="Instrumentation" siteSpecific="" platform="Unix Like" bus="Serial Line" manufacturer="Newport" reference="Omega"/>
     </description>
     <deviceProperties name="Serial" mandatory="true" description="Device name for serial line, or a local tty file path">
       <type xsi:type="pogoDsl:StringType"/>

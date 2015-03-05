@@ -4,9 +4,9 @@
 ## license : GPLv3+
 ##============================================================================
 ##
-## File :        infs.py
+## File :        OmegaCommunications.py
 ## 
-## Project :     NewportInfinityMeter
+## Project :     NewportOmega
 ##
 ## This file is part of Tango device class.
 ## 
@@ -41,17 +41,17 @@ import time
 import traceback
 import threading
 
-class InfinityMeterSerial(taurus.Logger):
+class OmegaSerial(taurus.Logger):
     '''The abstract superclass.
     '''
     def __init__(self):
-        taurus.Logger.__init__(self,"INFS")
+        taurus.Logger.__init__(self,"OMEGA")
 
-class INFSSerialDevFile(InfinityMeterSerial):
+class OmegaSerialDevFile(OmegaSerial):
     '''Class to manage the communications using a /dev/tty* file.
     '''
     def __init__(self,fileName):
-        InfinityMeterSerial.__init__(self)
+        OmegaSerial.__init__(self)
         self._fileName =fileName
         self._file = None
     def usesTango(self):
@@ -78,28 +78,28 @@ class INFSSerialDevFile(InfinityMeterSerial):
         self.debug("received %s"%(repr(answer)))
         return answer
 
-class INFSTango(InfinityMeterSerial):
+class OmegaTango(OmegaSerial):
     '''Abstract class for communicate using Tango.
     '''
     def __init__(self,proxy):
-        InfinityMeterSerial.__init__(self)
+        OmegaSerial.__init__(self)
         self._proxy = proxy
     def usesTango(self):
         return True
 
-class INFSSerialDevice(INFSTango):
+class OmegaSerialDevice(OmegaTango):
     '''Class to manage the communications using a Tango device 
        with Serial DeviceClass.
     '''
     def __init__(self,proxy):
-        INFSTango.__init__(self,proxy)
+        OmegaTango.__init__(self,proxy)
     #FIXME: check this device class methods for open&close (and isOpen)
     def open(self):
-        pass
+        raise NotImplementedError("Not available yet.")
     def close(self):
-        pass
+        raise NotImplementedError("Not available yet.")
     def isOpen(self):
-        pass
+        raise NotImplementedError("Not available yet.")
     def flush(self):
         self._proxy.DevSerFlush(2)
     def write(self,address,command):
@@ -111,12 +111,12 @@ class INFSSerialDevice(INFSTango):
         self.debug("received %s"%(repr(answer)))
         return answer
 
-class INFSPySerialDevice(INFSTango):
+class OmegaPySerialDevice(OmegaTango):
     '''Class to manage the communications using a Tango device 
        with PySerial DeviceClass.
     '''
     def __init__(self,proxy):
-        INFSTango.__init__(self,proxy)
+        OmegaTango.__init__(self,proxy)
     def open(self):
         if self._proxy.state() == PyTango.DevState.OFF:
             self._proxy.open()
@@ -153,7 +153,7 @@ PEAK = 'PeakValue'
 VALLEY = 'ValleyValue'
 FILTERED = 'FilteredValue'
 
-class InfinityMeter(taurus.Logger):
+class Omega(taurus.Logger):
     '''Interface class to made the connection transparent and 
        homogeneous access.
     '''
@@ -173,12 +173,12 @@ class InfinityMeter(taurus.Logger):
     def __init__(self,serialName,
                  addr='',sleepTime=MINREADTIME,statusCallback=None,
                  logLevel=taurus.Logger.Info):
-        self._name = "INFS%s"%addr
+        self._name = "OMEGA%s"%addr
         taurus.Logger.__init__(self,self._name)
         threading.currentThread().setName(self._name)
         if serialName.startswith('/dev/tty'):
             #this will connect direct by serial line
-            self._serial = INFSSerialDevFile(serialName)
+            self._serial = OmegaSerialDevFile(serialName)
         else:
             #other way, it shall be a tango device name 
             #of a serial or a pyserial
@@ -187,9 +187,9 @@ class InfinityMeter(taurus.Logger):
             except PyTango.DevFailed,e:
                 raise NameError(e.args[-1].desc)
             if proxy.info().dev_class == 'PySerial':
-                self._serial = INFSPySerialDevice(proxy)
+                self._serial = OmegaPySerialDevice(proxy)
             elif proxy.info().dev_class == 'Serial':
-                self._serial = INFSSerialDevice(proxy)
+                self._serial = OmegaSerialDevice(proxy)
             else:
                 raise NotImplementedError("Unable to identify how to manage "\
                                           "the given name %s"%(serialName))
@@ -386,11 +386,11 @@ class InfinityMeter(taurus.Logger):
         elif errorCode.startswith('+') or errorCode.startswith('-') and \
                                        int(errorCode) in [+999999,-999999]:
             self.pushStatusCallback(taurus.Logger.Warning,"Received an "\
-                                    "overflow answer: %s"%(repr(answer)))
+                                    "overflow answer: %s"%(repr(errorCode)))
         else:
             self.pushStatusCallback(taurus.Logger.Warning,"Receiver an "\
                                     "unknown error code: %s"
-                                    %(repr(answer)))
+                                    %(repr(errorCode)))
     #---- done communications
     #####
     
@@ -554,27 +554,27 @@ class InfinityMeter(taurus.Logger):
     #---- done Subscription
     #####
 
-def readAll(infs,n,parallel=False):
+def readAll(omega,n,parallel=False):
     '''One of the tests is to proceed to read many times all the needed values
        from the instrument.
        This shall advise if this feature is not supported!
     '''
     for i in range(1,n+1):
-        infs.open()
-        infs._flush()
+        omega.open()
+        omega._flush()
         if parallel:
-            address = infs._address
+            address = omega._address
             concatenation = ""
             for command in [UNFILTERED,PEAK,VALLEY,FILTERED]:
-                cmd = "*%s%s\r"%(address,infs.commands[command])
+                cmd = "*%s%s\r"%(address,omega.commands[command])
                 concatenation = "%s%s"%(concatenation,cmd)
             print("sending %r"%(concatenation))
-            infs._serial._file.write(cmd)
+            omega._serial._file.write(cmd)
             answer = ""
             j = 0
             while len(answer) == 0 and j < ANSWERRETRIES:
                 time.sleep(TIMEBETWEENREAD)
-                answer = infs._serial._file.read()
+                answer = omega._serial._file.read()
                 j += 1
             print("%r (%d tries)"%(answer,j))
             unfiltered = float('nan')
@@ -584,7 +584,7 @@ def readAll(infs,n,parallel=False):
             if answer.count("\r") != 0:
                 alist = answer.split('\r')
                 for i,cmd in enumerate([UNFILTERED,PEAK,VALLEY,FILTERED]):
-                    value = infs._postprocessAnswer(infs.commands[cmd],
+                    value = omega._postprocessAnswer(omega.commands[cmd],
                                                     alist[i])
                     if cmd == UNFILTERED: unfiltered = value
                     elif cmd == PEAK: peak = value
@@ -595,17 +595,17 @@ def readAll(infs,n,parallel=False):
                       "PARALLEL READINGS! ---\n")
                 return
         else:
-            unfiltered = infs.getUnfilteredValue()
-            peak = infs.getPeakValue()
-            valley = infs.getValleyValue()
-            filtered = infs.getFilteredValue()
+            unfiltered = omega.getUnfilteredValue()
+            peak = omega.getPeakValue()
+            valley = omega.getValleyValue()
+            filtered = omega.getFilteredValue()
         print("read: %d/%d\n"\
               "Unfiltered: %g\n"\
               "Filtered:   %g\n"\
               "Peak:       %g\n"\
               "Valley:     %g\n"
               %(i,n,unfiltered,filtered,peak,valley))
-        infs.close()
+        omega.close()
 
 def main():
     from optparse import OptionParser
@@ -614,7 +614,7 @@ def main():
                       help="String with the reference name "\
                       "to use for serial line connection.")
     parser.add_option('-a',"--address",default='',
-                      help="Two digit string with the address of the INFS.")
+                      help="Two digit string with the address of the OMEGA.")
     parser.add_option('-t',"--sleep",type="float",default=MINREADTIME,
                       help="Wait time between write and read operations")
     parser.add_option('',"--log-level",default="info",
@@ -633,12 +633,12 @@ def main():
                }[options.log_level.lower()]
     if options.serial != None:
         try:
-            infs = InfinityMeter(options.serial,
-                                 addr=options.address,
-                                 sleepTime=options.sleep,
-                                 statusCallback=None,
-                                 logLevel=logLevel)
-            readAll(infs,options.reads,options.parallel_read)
+            omega = Omega(options.serial,
+                          addr=options.address,
+                          sleepTime=options.sleep,
+                          statusCallback=None,
+                          logLevel=logLevel)
+            readAll(omega,options.reads,options.parallel_read)
         except Exception,e:
             print("Error testing the Infinity Meter: '%s'"%(e))
             traceback.print_exc()
