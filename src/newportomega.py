@@ -134,7 +134,15 @@ class NewportOmega (PyTango.Device_4Impl):
         self.debug_stream("In %s::cleanAllImportantLogs()"%self.get_name())
         self._important_logs = []
         self.addStatusMsg("")
-        
+    
+    def _setAttrsInvalid(self):
+        '''Sometimes is needed to propagate an error or a warning together 
+           with a general invalid quality of the attributes.
+        '''
+        for attrName in self._measuredValues.keys():
+                self.fireEvent(attrName,float('NaN'),
+                               PyTango.AttrQuality.ATTR_INVALID)
+    
     def statusCallback(self,msgType,msgText):
         '''Used from the instance of the instrument to report a communication 
            issue with the instrument.
@@ -149,11 +157,14 @@ class NewportOmega (PyTango.Device_4Impl):
             self.change_state(PyTango.DevState.FAULT,cleanImportantLogs=True)
             important = True
             self._omega.unsubscribeAll()
+            self._setAttrsInvalid()
         elif msgType == Logger.Warning:
-            self.change_state(PyTango.DevState.ALARM)
+            if self.get_state() != PyTango.DevState.FAULT:
+                self.change_state(PyTango.DevState.ALARM)
             important = True
         elif msgType == Logger.Info:
-            self.change_state(PyTango.DevState.ON, cleanImportantLogs=True)
+            if self.get_state() != PyTango.DevState.FAULT:
+                self.change_state(PyTango.DevState.ON, cleanImportantLogs=True)
         else:
             important = False
         self.addStatusMsg(msgText,important)
@@ -347,11 +358,20 @@ class NewportOmega (PyTango.Device_4Impl):
     def delete_device(self):
         self.debug_stream("In " + self.get_name() + ".delete_device()")
         #----- PROTECTED REGION ID(NewportOmega.delete_device) ENABLED START -----#
-        if self.get_state() == PyTango.DevState.ON:
+        if self.get_state() in [PyTango.DevState.ON,PyTango.DevState.ALARM]:
             self.Close()
-            #del self._omega
-            self._omega.__del__()
-            self._omega = None
+            i = 0
+            while i < 20 and self._omega.isAlive() or self._omega.isOpen():
+                i+=1
+                self.debug_stream("waiting the Omega object to finish"\
+                                  " (%d)"%(i))
+                time.sleep(0.1)
+                #20*0.1: a 2 seconds wait to finish
+            if i == 20:
+                #del self._omega
+                self._omega.__del__()
+                self._omega = None
+                #this will probably produce a coredump, but we've wait too much
         #----- PROTECTED REGION END -----#	//	NewportOmega.delete_device
 
 #------------------------------------------------------------------
