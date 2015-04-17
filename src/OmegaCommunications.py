@@ -34,6 +34,7 @@
 ## $HeadUrl :     $
 ##############################################################################
 
+import serial
 import PyTango
 import taurus
 import array
@@ -47,28 +48,51 @@ class OmegaSerial(taurus.Logger):
     def __init__(self):
         taurus.Logger.__init__(self,"OMEGA")
 
+MAXFLUSHIT = 10
+
 class OmegaSerialDevFile(OmegaSerial):
     '''Class to manage the communications using a /dev/tty* file.
     '''
-    def __init__(self,fileName):
+    def __init__(self,fileName,baudrate=19200,databits=serial.SEVENBITS,
+                 parity=serial.PARITY_ODD,stopbits=serial.STOPBITS_ONE):
         OmegaSerial.__init__(self)
         self._fileName =fileName
         self._file = None
+        self._baudrate = baudrate
+        self._databits = databits
+        self._parity = parity
+        self._stopbits = stopbits
+        
+    def __str__(self):
+        return "%s (%d,%d,%d,%s)"%(self._fileName,self._baudrate,\
+                                   self._databits,self._stopbits,self._parity)
     def usesTango(self):
         return False
     def open(self):
-        self._file = open(self._fileName,'r+')#Read and write
+        #self._file = open(self._fileName,'r+')#Read and write
+        self._file = serial.Serial(port=self._fileName,
+                                   baudrate=self._baudrate,
+                                   bytesize=self._databits,
+                                   parity=self._parity,
+                                   stopbits=self._stopbits,
+                                   xonxoff=1,timeout=0.1)
     def close(self):
         if self._file != None:
             self._file.close()
     def isOpen(self):
-        if self._file != None and not self._file.closed:
+        if self._file != None and self._file.isOpen():
             return True
         return False
     def flush(self):
         self._file.flush()
-        while len(self._file.readline()) != 0:
-            pass
+        i = 0
+        
+        while i < MAXFLUSHIT and len(self._file.readline()) != 0:
+            print("."*i)
+            i += 1
+        if i == MAXFLUSHIT:
+            self.warning("After %d iterations, flush didn't finish"%(MAXFLUSHIT))
+        print(".")
     def write(self,address,command):
         cmd = "*%s%s\r"%(address,command)
         self.debug("sending: %s"%(repr(cmd)))
@@ -84,6 +108,8 @@ class OmegaTango(OmegaSerial):
     def __init__(self,proxy):
         OmegaSerial.__init__(self)
         self._proxy = proxy
+    def __str__(self):
+        return "%s"%(self._proxy.name)
     def usesTango(self):
         return True
 
@@ -228,6 +254,8 @@ class Omega(taurus.Logger):
             except RuntimeError,e:
                 self.error("RuntimeError: %s"%(e))
                 break
+    def __str__(self):
+        return "Omega(%s)"%(self._serial)
     def usesTango(self):
         return self._serial.usesTango()
     def pushStatusCallback(self,msgType,msgText):
@@ -554,46 +582,61 @@ class Omega(taurus.Logger):
     #---- done Subscription
     #####
 
+def parallelWriteTest(omega):
+    '''We may speed up multiple readings by doing write operation with multiple
+       requests.
+       But the instrument looks that doesn't support it.
+    '''
+    address = omega._address
+    concatenation = ""
+    for command in [UNFILTERED,PEAK,VALLEY,FILTERED]:
+        cmd = "*%s%s\r"%(address,omega.commands[command])
+        concatenation = "%s%s"%(concatenation,cmd)
+    print("sending %r"%(concatenation))
+    omega._serial._file.write(cmd)
+    answer = ""
+    j = 0
+    while len(answer) == 0 and j < ANSWERRETRIES:
+        time.sleep(TIMEBETWEENREAD)
+        answer = omega._serial._file.read()
+        j += 1
+    print("%r (%d tries)"%(answer,j))
+    unfiltered = float('nan')
+    peak = float('nan')
+    valley = float('nan')
+    filtered = float('nan')
+    if answer.count("\r") != 0:
+        alist = answer.split('\r')
+        for i,cmd in enumerate([UNFILTERED,PEAK,VALLEY,FILTERED]):
+            value = omega._postprocessAnswer(omega.commands[cmd],
+                                            alist[i])
+            if cmd == UNFILTERED: unfiltered = value
+            elif cmd == PEAK: peak = value
+            elif cmd == VALLEY: valley = value
+            elif cmd == FILTERED: filtered = value
+    else:
+        print("\n\t --- THIS INSTRUMENT DOES NOT SUPPORT "\
+              "PARALLEL READINGS! ---\n")
+        return
+
 def readAll(omega,n,parallel=False):
     '''One of the tests is to proceed to read many times all the needed values
        from the instrument.
        This shall advise if this feature is not supported!
     '''
+    print("readAll(%s,%d,%s)"%(omega,n,parallel))
     for i in range(1,n+1):
+        print("1")
         omega.open()
+        print("2")
         omega._flush()
+        print("3")
         if parallel:
-            address = omega._address
-            concatenation = ""
-            for command in [UNFILTERED,PEAK,VALLEY,FILTERED]:
-                cmd = "*%s%s\r"%(address,omega.commands[command])
-                concatenation = "%s%s"%(concatenation,cmd)
-            print("sending %r"%(concatenation))
-            omega._serial._file.write(cmd)
-            answer = ""
-            j = 0
-            while len(answer) == 0 and j < ANSWERRETRIES:
-                time.sleep(TIMEBETWEENREAD)
-                answer = omega._serial._file.read()
-                j += 1
-            print("%r (%d tries)"%(answer,j))
-            unfiltered = float('nan')
-            peak = float('nan')
-            valley = float('nan')
-            filtered = float('nan')
-            if answer.count("\r") != 0:
-                alist = answer.split('\r')
-                for i,cmd in enumerate([UNFILTERED,PEAK,VALLEY,FILTERED]):
-                    value = omega._postprocessAnswer(omega.commands[cmd],
-                                                    alist[i])
-                    if cmd == UNFILTERED: unfiltered = value
-                    elif cmd == PEAK: peak = value
-                    elif cmd == VALLEY: valley = value
-                    elif cmd == FILTERED: filtered = value
-            else:
-                print("\n\t --- THIS INSTRUMENT DOES NOT SUPPORT "\
-                      "PARALLEL READINGS! ---\n")
-                return
+            try:
+                parallelWriteTest(omega)
+            except Exception,e:
+                print("Exception trying to do parallel writes: %s"%(e))
+            return
         else:
             unfiltered = omega.getUnfilteredValue()
             peak = omega.getPeakValue()
@@ -623,7 +666,7 @@ def main():
                       "default")
     parser.add_option('-r',"--reads",type='int',default=1,
                       help="Number of consecutive sets of readings")
-    parser.add_option('',"--parallel-read",action="store_true",
+    parser.add_option('',"--parallel-read",action="store_true",default=False,
                       help="")
     (options, args) = parser.parse_args()
     logLevel = {'error':taurus.Logger.Error,
