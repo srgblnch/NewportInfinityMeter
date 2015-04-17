@@ -53,6 +53,8 @@ MAXFLUSHIT = 10
 class OmegaSerialDevFile(OmegaSerial):
     '''Class to manage the communications using a /dev/tty* file.
     '''
+    _timeout = 0.1
+    _wtimeout = 0.1
     def __init__(self,fileName,baudrate=19200,databits=serial.SEVENBITS,
                  parity=serial.PARITY_ODD,stopbits=serial.STOPBITS_ONE):
         OmegaSerial.__init__(self)
@@ -69,38 +71,62 @@ class OmegaSerialDevFile(OmegaSerial):
     def usesTango(self):
         return False
     def open(self):
-        #self._file = open(self._fileName,'r+')#Read and write
-        self._file = serial.Serial(port=self._fileName,
-                                   baudrate=self._baudrate,
-                                   bytesize=self._databits,
-                                   parity=self._parity,
-                                   stopbits=self._stopbits,
-                                   xonxoff=1,timeout=0.1)
+        try:
+            self._file = serial.Serial(port=self._fileName,
+                                       baudrate=self._baudrate,
+                                       bytesize=self._databits,
+                                       parity=self._parity,
+                                       stopbits=self._stopbits,
+                                       xonxoff=1,
+                                       timeout=self._timeout,
+                                       writeTimeout=self._wtimeout)
+            return True
+        except serial.SerialException,e:
+            self.error("Cannot open %s due to:\n\t\"%s\""%(self._fileName,e))
+        except Exception,e:
+            self.error("Cannot open %s due to:\n\t\"%s\""%(self._fileName,e))
+            traceback.print_exc()
+        return False
     def close(self):
         if self._file != None:
-            self._file.close()
+            try:
+                self._file.close()
+                return True
+            except Exception,e:
+                self.error("Cannot close %s due to: %s"%(self._fileName,e))
+        return False
     def isOpen(self):
         if self._file != None and self._file.isOpen():
             return True
         return False
     def flush(self):
-        self._file.flush()
-        i = 0
-        
-        while i < MAXFLUSHIT and len(self._file.readline()) != 0:
-            print("."*i)
-            i += 1
-        if i == MAXFLUSHIT:
-            self.warning("After %d iterations, flush didn't finish"%(MAXFLUSHIT))
-        print(".")
+        if self._file != None:
+            self._file.flush()
+            i = 0
+            
+            while i < MAXFLUSHIT and len(self._file.readline()) != 0:
+                i += 1
+            if i == MAXFLUSHIT:
+                self.warning("After %d iterations, flush didn't finish"%(MAXFLUSHIT))
     def write(self,address,command):
-        cmd = "*%s%s\r"%(address,command)
-        self.debug("sending: %s"%(repr(cmd)))
-        self._file.write(cmd)
+        try:
+            cmd = "*%s%s\r"%(address,command)
+            self.debug("sending: %s"%(repr(cmd)))
+            self._file.write(cmd)
+        except serial.SerialTimeoutException,e:
+            self.error("Timeout doing write: %s"%(e))
+        except Exception,e:
+            self.error("Write fail due to: %s"%(e))
     def read(self):
-        answer = self._file.readline()
-        self.debug("received %s"%(repr(answer)))
-        return answer
+        try:
+            answer = self._file.readline()
+            self.debug("received %s"%(repr(answer)))
+            return answer
+        except serial.SerialTimeoutException,e:
+            self.error("Timeout doing read: %s"%(e))
+        except Exception,e:
+            self.error("Read fail due to: %s"%(e))
+        return ""
 
 class OmegaTango(OmegaSerial):
     '''Abstract class for communicate using Tango.
@@ -146,9 +172,15 @@ class OmegaPySerialDevice(OmegaTango):
     def open(self):
         if self._proxy.state() == PyTango.DevState.OFF:
             self._proxy.open()
+            if self.isOpen():
+                return True
+        return False
     def close(self):
         if self._proxy.state() == PyTango.DevState.ON:
             self._proxy.close()
+            if not self.isOpen():
+                return True
+        return False
     def isOpen(self):
         if self._proxy.state() == PyTango.DevState.ON:
             return True
@@ -202,9 +234,17 @@ class Omega(taurus.Logger):
         self._name = "OMEGA%s"%addr
         taurus.Logger.__init__(self,self._name)
         threading.currentThread().setName(self._name)
+        self._serial = None
         if serialName.startswith('/dev/tty'):
             #this will connect direct by serial line
-            self._serial = OmegaSerialDevFile(serialName)
+            try:
+                self._serial = OmegaSerialDevFile(serialName)
+            except Exception,e:
+                msg = "Failed to build serial line manager for %s: %s"\
+                      %(serialName,e)
+                self.errors(msg)
+                self.pushStatusCallback(taurus.Logger.Error,msg)
+                return
         else:
             #other way, it shall be a tango device name 
             #of a serial or a pyserial
@@ -255,9 +295,13 @@ class Omega(taurus.Logger):
                 self.error("RuntimeError: %s"%(e))
                 break
     def __str__(self):
-        return "Omega(%s)"%(self._serial)
+        if self._serial != None:
+            return "Omega(%s)"%(self._serial)
+        return "Omega(None)"
     def usesTango(self):
-        return self._serial.usesTango()
+        if self._serial != None:
+            return self._serial.usesTango()
+        return False
     def pushStatusCallback(self,msgType,msgText):
         if self._statusCallback != None:
             try:
@@ -276,20 +320,37 @@ class Omega(taurus.Logger):
             self.error("Avoiding an Open try! Thread is ")
         self._thread = threading.Thread(target=self.startThread)
         self._thread.setName("%sMonitor"%self._name)
-        self._serial.open()
-        self._joinerEvent.clear()
-        self._thread.start()
+        if self._serial != None and self._serial.open():
+            self._joinerEvent.clear()
+            self._thread.start()
+            return True
+        else:
+            self.pushStatusCallback(taurus.Logger.Error,
+                                    "Open() to the instrument has failed.")
+            return False
     def close(self):
-        self._serial.close()
-        self._joinerEvent.set()
-        while not self.P(blocking=False,trace=False):
-            self.V()
+        if self._serial != None:
+            self._serial.close()
+            self._joinerEvent.set()
+            while not self.P(blocking=False,trace=False):
+                self.V()
+        else:
+            self.pushStatusCallback(taurus.Logger.Error,
+                                    "Non opened instrument cannot be closed.")
     def _flush(self):
-        self._serial.flush()
+        if self._serial != None:
+            self._serial.flush()
     def _write(self,command):
-        self._serial.write(self._address,command)
+        if self._serial != None:
+            self._serial.write(self._address,command)
+            return
+        self.pushStatusCallback(taurus.Logger.Error,
+                                "Non opened instrument cannot be written.")
     def _read(self):
-        return self._serial.read()
+        if self._serial != None:
+            return self._serial.read()
+        self.pushStatusCallback(taurus.Logger.Error,
+                                "Non opened instrument cannot be read.")
 
     #TODO: this Semafore usage should be made using a decorator to avoid any 
     #      forgoten mutex release.
@@ -324,6 +385,9 @@ class Omega(taurus.Logger):
         if not self.P(blocking):
             self.debug("abort _sendAndReceive()")
             return float('NaN')
+        if self._serial == None:
+            self.pushStatusCallback(taurus.Logger.Error,
+                                "Non opened instrument cannot do send&receive")
         if not self._serial.isOpen() or self._joinerEvent.isSet():
             self.debug("abort _sendAndReceive()")
             return float('NaN')
@@ -358,18 +422,26 @@ class Omega(taurus.Logger):
             msg = "Too many failed readings, closing connection and try "\
                   "to reconnect in %d second. (previously %d failed "\
                   "recoconnections)"%(RECONNECTDELAY,self._failedReconnections)
-            self.pushStatusCallback(taurus.Logger.warning,msg)
+            self.pushStatusCallback(taurus.Logger.Warning,msg)
             self.warning(msg)
+            if self._serial == None:
+                self.pushStatusCallback(taurus.Logger.Error,
+                              "Non existing instrument cannot be reconnected.")
+                return
             self._serial.close()
             while self.isMutexLocked():#not self.P(blocking=False):
                 self.debug("releasing mutex")
                 self.V()
             time.sleep(RECONNECTDELAY)
             self._failedReading = 0
-            self._serial.open()
-            self.pushStatusCallback(taurus.Logger.info,
-                                    "(re)Connected to the instrument.")
-            self.info("reconnected")
+            if self._serial.open():
+                self.pushStatusCallback(taurus.Logger.Info,
+                                        "(re)Connected to the instrument.")
+                self.info("reconnected")
+            else:
+                self.pushStatusCallback(taurus.Logger.Error,
+                                        "Cannot be stablished communication "\
+                                        "with the instrument.")
         except Exception,e:
             msg = "Error in reconnection: %s"%(e)
             self.pushStatusCallback(taurus.Logger.Error,msg)
