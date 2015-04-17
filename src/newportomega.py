@@ -199,7 +199,8 @@ class NewportOmega (PyTango.Device_4Impl):
             threshold = self.addExpertAttribute(CHANGING_THRESHOLD_NAME,
                                                 PyTango.DevDouble,
                                                 CHANGING_THRESHOLD_LABEL)
-            self._expertAttrs[CHANGING_THRESHOLD_NAME] = None
+            self._expertAttrs[CHANGING_THRESHOLD_NAME] = \
+                                                     CHANGING_THRESHOLD_DEFAULT
             self.info_stream("Added Dynamic expert attribute %s"
                              %(CHANGING_THRESHOLD_NAME))
         except Exception,e:
@@ -305,6 +306,10 @@ class NewportOmega (PyTango.Device_4Impl):
         if not self._expertAttrs.has_key(attrName):
             if attr.get_type() == PyTango.DevDouble:
                 value = float('inf')
+            elif attr.get_type() in [PyTango.DevShort,PyTango.DevUShort,
+                                     PyTango.DevLong,PyTango.DevULong,
+                                     PyTango.DevLong64,PyTango.DevULong64]:
+                value = 0#there is no alternative for integers
             elif attr.get_type() == PyTango.DevString:
                 value = ""
             else:
@@ -481,9 +486,9 @@ class NewportOmega (PyTango.Device_4Impl):
         :rtype: PyTango.DevVoid """
         self.debug_stream("In " + self.get_name() +  ".Open()")
         #----- PROTECTED REGION ID(NewportOmega.Open) ENABLED START -----#
-        self._omega.open()
-        self.change_state(PyTango.DevState.ON)
-        self.addStatusMsg("Connected to the instrument.")
+        if self._omega.open():
+            self.change_state(PyTango.DevState.ON)
+            self.addStatusMsg("Connected to the instrument.")
         #----- PROTECTED REGION END -----#	//	NewportOmega.Open
         
 #------------------------------------------------------------------
@@ -506,9 +511,9 @@ class NewportOmega (PyTango.Device_4Impl):
         :rtype: PyTango.DevVoid """
         self.debug_stream("In " + self.get_name() +  ".Close()")
         #----- PROTECTED REGION ID(NewportOmega.Close) ENABLED START -----#
-        self._omega.close()
-        self.change_state(PyTango.DevState.OFF)
-        self.addStatusMsg("NOT connected to the instrument.")
+        if self._omega.close():
+            self.change_state(PyTango.DevState.OFF)
+            self.addStatusMsg("NOT connected to the instrument.")
         #----- PROTECTED REGION END -----#	//	NewportOmega.Close
         
 #------------------------------------------------------------------
