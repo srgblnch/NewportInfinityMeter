@@ -101,13 +101,20 @@ class OmegaSerialDevFile(OmegaSerial):
         return False
     def flush(self):
         if self._file != None:
-            self._file.flush()
-            i = 0
-            
-            while i < MAXFLUSHIT and len(self._file.readline()) != 0:
-                i += 1
-            if i == MAXFLUSHIT:
-                self.warning("After %d iterations, flush didn't finish"%(MAXFLUSHIT))
+            try:
+                if self._file.inWaiting() != 0:
+                    self.debug("flushing incomming %d elements."
+                               %(self._file.inWaiting()))
+                    self._file.flushInput()
+                #don't flush the output or it stays a long while the instrument
+                #has been unplugged of the serial line.
+                #self._file.flushOutput()
+                return True
+            except Exception,e:
+                self.error("Flush Exception: %s"%(e))
+            return False
+        self.warning("Flushing unexisting descriptor!")
+        return False
     def write(self,address,command):
         try:
             cmd = "*%s%s\r"%(address,command)
@@ -154,6 +161,7 @@ class OmegaSerialDevice(OmegaTango):
         raise NotImplementedError("Not available yet.")
     def flush(self):
         self._proxy.DevSerFlush(2)
+        return True
     def write(self,address,command):
         cmd = "*%s%s\r"%(address,command)
         self.debug("sending: %s"%(repr(cmd)))
@@ -186,8 +194,12 @@ class OmegaPySerialDevice(OmegaTango):
             return True
         return False
     def flush(self):
-        self._proxy.FlushInput()
-        self._proxy.FlushOutput()
+        try:
+            self._proxy.FlushInput()
+            self._proxy.FlushOutput()
+            return True
+        except:
+            return False
     def write(self,address,command):
         cmd = "*%s%s\r"%(address,command)
         cmdlist = array.array('B',cmd).tolist()
@@ -201,10 +213,10 @@ class OmegaPySerialDevice(OmegaTango):
 MAXSUBSCRIPTORS = 10
 MINREADTIME = 0.05
 TIMEBETWEENREAD = 0.5
-ANSWERRETRIES = 10
-RECONNECTTHRESHOLD = 4
-RECONNECTLIMIT = 2
-RECONNECTDELAY = 1#s
+ANSWERRETRIES = 5
+RECONNECTTHRESHOLD = 2
+RECONNECTLIMIT = 1
+RECONNECTDELAY = 0.5#s
 
 UNFILTERED = 'UnfilteredValue'
 PEAK = 'PeakValue'
@@ -329,24 +341,33 @@ class Omega(taurus.Logger):
                                     "Open() to the instrument has failed.")
             return False
     def close(self):
+        if hasattr(self,'_joinerEvent'):
+            self._joinerEvent.set()
         if self._serial != None:
             self._serial.close()
-            self._joinerEvent.set()
-            while not self.P(blocking=False,trace=False):
-                self.V()
+#            while not self.P(blocking=False,trace=False):
+#                self.V()
+            return True
         else:
             self.pushStatusCallback(taurus.Logger.Error,
                                     "Non opened instrument cannot be closed.")
+            return False
+    def isOpen(self):
+        return self._serial.isOpen()
+    def isAlive(self):
+        return self._thread.isAlive()
     def _flush(self):
         if self._serial != None:
-            self._serial.flush()
+            return self._serial.flush()
     def _write(self,command):
+        self.debug("write(%s)"%command)
         if self._serial != None:
             self._serial.write(self._address,command)
             return
         self.pushStatusCallback(taurus.Logger.Error,
                                 "Non opened instrument cannot be written.")
     def _read(self):
+        self.debug("read()")
         if self._serial != None:
             return self._serial.read()
         self.pushStatusCallback(taurus.Logger.Error,
@@ -369,9 +390,11 @@ class Omega(taurus.Logger):
         if not self._lastRead == None:
             diff_t = time.time() - self._lastRead
             if diff_t < TIMEBETWEENREAD:
+                t = TIMEBETWEENREAD - diff_t
                 self.debug("Not enough time between reads (%f), wait %f left"
-                           %(diff_t,TIMEBETWEENREAD - diff_t))
-                time.sleep(TIMEBETWEENREAD - diff_t)
+                           %(diff_t,t))
+                time.sleep(t)
+                self.debug("wake up!")
 
     def _sendAndReceive(self,cmd,blocking=True):
         '''Usually a write operation to this instrument is an information 
@@ -380,8 +403,12 @@ class Omega(taurus.Logger):
         self.debug("_sendAndReceive(%s) [Mutex %s]"
                    %(cmd,"locked" if self.isMutexLocked() else "unlocked"))
         self.__checklastRead()
-        self._flush()
+        if self._joinerEvent.isSet():
+            return float('NaN')
         self._lastRead = time.time()
+        if not self._flush():
+            self.pushStatusCallback(taurus.Logger.Error,
+                                    "Flush exception, check communications")
         if not self.P(blocking):
             self.debug("abort _sendAndReceive()")
             return float('NaN')
@@ -394,7 +421,9 @@ class Omega(taurus.Logger):
         self._write(cmd)
         i = 0
         while i < ANSWERRETRIES:
-            time.sleep(self._sleepTime+(self._sleepTime*i*0.1))
+            t = self._sleepTime+(self._sleepTime*i*0.1)
+            self.debug("going to sleep %f seconds"%(t))
+            time.sleep(t)
             answer = self._read()
             if len(answer) != 0:
                 break
@@ -419,10 +448,11 @@ class Omega(taurus.Logger):
            it tries to make a connection again.
         '''
         try:
-            msg = "Too many failed readings, closing connection and try "\
-                  "to reconnect in %d second. (previously %d failed "\
-                  "recoconnections)"%(RECONNECTDELAY,self._failedReconnections)
-            self.pushStatusCallback(taurus.Logger.Warning,msg)
+#            msg = "Too many failed readings, closing connection and try "\
+#                  "to reconnect in %d second. (previously %d failed "\
+#                  "recoconnections)"%(RECONNECTDELAY,self._failedReconnections)
+            msg = "Too many failed readings, review connection and call Init()"
+            self.pushStatusCallback(taurus.Logger.Error,msg)
             self.warning(msg)
             if self._serial == None:
                 self.pushStatusCallback(taurus.Logger.Error,
@@ -452,6 +482,7 @@ class Omega(taurus.Logger):
            can come from a different request, or reports an overflow in the 
            instrument, or simply the answer is not complete.
         '''
+        self.debug("_postprocessAnswer(%s,%r)"%(cmd,answer))
         if answer.count('?'):
             # IN CASE OF OVERFLOW, THE ANSWER IS: 
             # '0_X0_?+999999\r'
@@ -610,7 +641,12 @@ class Omega(taurus.Logger):
                                    self._sendAndReceive(self.commands[command])
                     except ValueError,e:
                         self.warning("ValueError from %s: %s"%(command,e))
-                        if self._failedReading >= RECONNECTTHRESHOLD:
+                        if self._failedReconnections >= RECONNECTLIMIT:
+                            msg = "reach %d consecutive reconnections "\
+                                  "failed: no more tries (review and Init())"\
+                                  %(self._failedReconnections)
+                            self.pushStatusCallback(taurus.Logger.Error,msg)
+                        elif self._failedReading >= RECONNECTTHRESHOLD:
                             self.reconnect()
                             #check if the reconnection has succeed
                             try:
@@ -623,11 +659,8 @@ class Omega(taurus.Logger):
                                 self._failedReconnections = 0
                                 msg = "Connected to the instrument."
                                 self.pushStatusCallback(taurus.Logger.Info,msg)
-                        if self._failedReconnections >= RECONNECTLIMIT:
-                            msg = "reach %d consecutive reconnections "\
-                                  "failed: no more tries (review and Init())"\
-                                  %(self._failedReconnections)
-                            self.pushStatusCallback(taurus.Logger.Error,msg)
+                        else:
+                            self._answers[command] = float('NaN')
                 for command in self._subscribers:
                     if self._answers.has_key(command):
                         if self._answers[command] != None:
@@ -638,6 +671,8 @@ class Omega(taurus.Logger):
             except Exception,e:
                 self.error("Thread exception: %s"%(e))#FIXME:
                 traceback.print_exc()
+                self.pushStatusCallback(taurus.Logger.Error,
+                                "Communication cut. Please Init() the device.")
             self._threadLoopCondition.release()
         self.info("Ending %s thread"%(threading.currentThread().getName()))
         
@@ -698,11 +733,8 @@ def readAll(omega,n,parallel=False):
     '''
     print("readAll(%s,%d,%s)"%(omega,n,parallel))
     for i in range(1,n+1):
-        print("1")
         omega.open()
-        print("2")
         omega._flush()
-        print("3")
         if parallel:
             try:
                 parallelWriteTest(omega)
