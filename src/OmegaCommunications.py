@@ -223,6 +223,12 @@ PEAK = 'PeakValue'
 VALLEY = 'ValleyValue'
 FILTERED = 'FilteredValue'
 
+BLOCKA = 'BlockA'
+BLOCKB = 'BlockB'
+BLOCKC = 'BlockC'
+BLOCKD = 'BlockD'
+BLOCKE = 'BlockE'
+
 class Omega(taurus.Logger):
     '''Interface class to made the connection transparent and 
        homogeneous access.
@@ -231,7 +237,12 @@ class Omega(taurus.Logger):
     commands = {UNFILTERED:'X01',
                 PEAK:      'X02',
                 VALLEY:    'X03',
-                FILTERED:  'X04'}
+                FILTERED:  'X04',
+                BLOCKA:    'R40',
+                BLOCKB:    'R41',
+                BLOCKC:    'R42',
+                BLOCKD:    'R43',
+                BLOCKE:    'R44'}
     errors = {"43":"Command Error",
               "46":"Format Error",
               "48":"Checksum Error",
@@ -239,6 +250,12 @@ class Omega(taurus.Logger):
               "4C":"Calibration/Write Lockout Error",
               "45":"EEPROM Write Lockout Error",
               "56":"Serial Device Address Error"}
+    _floatCmds = [UNFILTERED,PEAK,VALLEY,FILTERED]
+    _hexlistCmds = {BLOCKA:6,
+                    BLOCKB:[2,6,2],
+                    BLOCKC:[4,4,4,2],
+                    BLOCKD:4,
+                    BLOCKE:4}
 
     def __init__(self,serialName,
                  addr='',sleepTime=MINREADTIME,statusCallback=None,
@@ -396,7 +413,7 @@ class Omega(taurus.Logger):
                 time.sleep(t)
                 self.debug("wake up!")
 
-    def _sendAndReceive(self,cmd,blocking=True):
+    def _sendAndReceive(self,cmd,blocking=True,postprocess=True):
         '''Usually a write operation to this instrument is an information 
            request to it. This method manages the write and the needed read.
         '''
@@ -440,7 +457,10 @@ class Omega(taurus.Logger):
                              %(self._address,repr(cmd)[1:-1]))
         self._failedReading = 0
         self.V()
-        return self._postprocessAnswer(cmd, answer)
+        if postprocess:
+            return self._postprocessAnswer(cmd, answer)
+        else:
+            return answer
 
     def reconnect(self):
         '''This method disconnects from the instrument and releases the mutex
@@ -501,11 +521,49 @@ class Omega(taurus.Logger):
                                    "for the question '*%s\\r'."
                                    %(repr(answer),command))
             return float('NaN')
-        else:
-            #FIXME: this is no exception protected.
+        try:
             answer = answer.strip().replace(command,'')
             self.debug("Answer string: %s"%(repr(answer)))
+        except Exception,e:
+            self.pushStatusCallback(taurus.Logger.Warning,
+                                "Answer %r cannot be isolated."%(repr(answer)))
+            return float('NaN')
+        cmdLongName = self._getKeyFromItemInDict(self.commands,command)
+        if not cmdLongName:
+            cmdLongName = self._getKeyFromItemInDict(self.commands,command[2:])
+        #self.info(10*"\n"+"No exception processing an answer... (%s:%s)"
+        #          %(cmdLongName,cmd))
+        if cmdLongName in self._floatCmds:
+            #measurements return as floats
             return float(answer)
+        elif cmdLongName in self._hexlistCmds.keys():
+            #special requests return hexadecimal lists
+            #self.info("\tcommand return a string")
+            separations = self._hexlistCmds[cmdLongName]
+            finalAnswer = self._splitAnswerBlocks(answer,separations)
+            #self.info("\t"+"%s"%(finalAnswer))
+            return finalAnswer
+    
+    def _getKeyFromItemInDict(self,d,id):
+        for k,v in d.items():
+            if v == id:
+                return k
+        return None
+    
+    def _splitAnswerBlocks(self,block,groupSize):
+        answer = []
+        if type(groupSize) is int:
+            for i in range(0,len(block),groupSize):
+                answer.append(block[i:i+groupSize])
+            return answer
+        elif type(groupSize) is list:
+            for e in groupSize:
+                answer.append(block[0:e])
+                block = block[e:]
+            if block:
+                answer += self._splitAnswerBlocks(block,groupSize[-1])
+            return answer
+        return block
     
     def __interpretErrorCode(self,errorCode):
         '''

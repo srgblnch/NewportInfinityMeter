@@ -34,14 +34,15 @@ import PyTango
 import sys
 # Add additional import
 #----- PROTECTED REGION ID(NewportOmega.additionnal_import) ENABLED START -----#
-from types import StringType #used for Exec()
-import pprint #used for Exec()
-from OmegaCommunications import Omega
-import time
-from math import isnan,isinf
 import functools
+from   math                import isnan,isinf
+from   OmegaCommunications import Omega
+import pprint                                 #used for Exec()
+from   taurus              import Logger
+import time
 import traceback
-from taurus import Logger
+from   types               import StringType  #used for Exec()
+
 
 def AttrExc(function):
     '''Decorates commands so that the exception is logged and also raised.
@@ -172,7 +173,7 @@ class NewportOmega (PyTango.Device_4Impl):
     
     #####
     #---- #dynattrs segment
-    def addDynAttribute(self,attrName):
+    def addDynAttribute(self,attrName,units=True,events=True):
         '''Based on the elements listed in the property Measures, each of them
            will pass throw this method to build dynamic tango attributes for
            this device and configure them in the same way with events.
@@ -183,18 +184,20 @@ class NewportOmega (PyTango.Device_4Impl):
             #Prepare the tango attribute
             attr = PyTango.Attr(attrName,PyTango.DevDouble,PyTango.READ)
             readmethod = AttrExc(getattr(self,'read_attr'))
-            aprop = PyTango.UserDefaultAttrProp()
-            aprop.set_format("%6.3f")
-            if type(self.Units) == str:
-                aprop.set_unit(latin1(self.Units))
-            attr.set_default_properties(aprop)
+            if units:
+                aprop = PyTango.UserDefaultAttrProp()
+                aprop.set_format("%6.3f")
+                if type(self.Units) == str:
+                    aprop.set_unit(latin1(self.Units))
+                attr.set_default_properties(aprop)
             #Insert this new attribute to the current device
             self.add_attribute(attr,r_meth=readmethod)
             #Stablish events for this attribute
-            self.set_change_event(attrName,True,False)
-            self.omegaCallback(attrName,float('NaN'))
-            #subscribe it to have periodic readings and event emission.
-            self._omega.subscribe(attrName,self.omegaCallback)
+            if events:
+                self.set_change_event(attrName,True,False)
+                self.omegaCallback(attrName,float('NaN'))
+                #subscribe it to have periodic readings and event emission.
+                self._omega.subscribe(attrName,self.omegaCallback)
             self.info_stream("Added Dynamic attribute %s"%(attrName))
         except Exception,e:
             self.error_stream("The dynamic attribute %s cannot be created "\
@@ -207,7 +210,7 @@ class NewportOmega (PyTango.Device_4Impl):
            the threshold of difference to set quality changing.
         '''
         try:
-            threshold = self.addExpertAttribute(CHANGING_THRESHOLD_NAME,
+            threshold = self._addExpertAttribute(CHANGING_THRESHOLD_NAME,
                                                 PyTango.DevDouble,
                                                 CHANGING_THRESHOLD_LABEL)
             self._expertAttrs[CHANGING_THRESHOLD_NAME] = \
@@ -217,7 +220,7 @@ class NewportOmega (PyTango.Device_4Impl):
         except Exception,e:
             self.error_stream("The expert dynamic attributes cannot be "\
                               "created due to: %s"%(e))
-    def addExpertAttribute(self,name,type,label=None):
+    def _addExpertAttribute(self,name,type,label=None):
         '''builder of expert memorized attributes.
         '''
         attr = PyTango.Attr(name,type, PyTango.READ_WRITE)
@@ -233,6 +236,32 @@ class NewportOmega (PyTango.Device_4Impl):
         attr.set_default_properties(aprop)
         self.add_attribute(attr,r_meth=readmethod,w_meth=writemethod)
         return attr
+    
+    def addExpertBlockAttributes(self):
+        '''There are some readings from the instrument that responds blocks
+           of hexadecimal values in string array. They are interfaced in the 
+           device as expert attributes _without_events_.
+        '''
+        try:
+            attrs = {}
+            for block in self._omega._hexlistCmds.keys():
+                attrs[block] = self._addBlockAttr(block)
+        except Exception,e:
+            self.error_stream("Block attributes cannot be added due to: %s"
+                              %(e))
+            return
+        for block in attrs.keys():
+            try:
+                self.add_attribute(attrs[block][0],attrs[block][1])
+                self._expertAttrs[block] = None
+            except Exception,e:
+                self.error_stream("Exception adding %s: %s"%(block,e))
+
+    def _addBlockAttr(self,block):
+        attr = PyTango.SpectrumAttr(block,PyTango.DevString,PyTango.READ,20)
+        attr.set_disp_level(PyTango.DispLevel.EXPERT)
+        readmethod = AttrExc(getattr(self,'read_expert_attr'))
+        return (attr,readmethod)
     
     def fireEvent(self,attrName,value,quality=PyTango.AttrQuality.ATTR_VALID):
         '''Like overload the push_change_event to have logging of it.
@@ -314,22 +343,53 @@ class NewportOmega (PyTango.Device_4Impl):
         '''Generic Get method for the expert attributes.
         '''
         attrName = attr.get_name()
+        self.debug_stream("read_expert_attr(%s)"%(attrName))#-
         if not self._expertAttrs.has_key(attrName):
-            if attr.get_type() == PyTango.DevDouble:
+            if attr.get_data_type() is PyTango.DevDouble:
                 value = float('inf')
-            elif attr.get_type() in [PyTango.DevShort,PyTango.DevUShort,
+            elif attr.get_data_type() in [PyTango.DevShort,PyTango.DevUShort,
                                      PyTango.DevLong,PyTango.DevULong,
                                      PyTango.DevLong64,PyTango.DevULong64]:
                 value = 0#there is no alternative for integers
-            elif attr.get_type() == PyTango.DevString:
+            elif attr.get_data_type() is PyTango.DevString:
                 value = ""
             else:
                 value = None
             quality = PyTango.AttrQuality.ATTR_INVALID
         else:
-            value = self._expertAttrs[attrName]
+            if attr.get_data_format() is PyTango.AttrDataFormat.SPECTRUM:
+                t = time.time()
+                i = 0
+                while time.time() - t < 1.0:
+                    self.debug_stream("block read try %d"%(i))
+                    value = self._doReadBlock(attrName)
+                    if value != None:
+                        break
+                    i+=1
+                self.debug_stream("Read completated in %g seconds"
+                                  %(time.time() - t))
+                self._expertAttrs[attrName] = value
+            else:
+                value = self._expertAttrs[attrName]
             quality = PyTango.AttrQuality.ATTR_VALID
-        attr.set_value_date_quality(value,time.time(),quality)
+        if attr.get_data_format() == PyTango.AttrDataFormat.SCALAR:
+            attr.set_value_date_quality(value,time.time(),quality)
+        elif attr.get_data_format() == PyTango.AttrDataFormat.SPECTRUM:
+            attr.set_value_date_quality(value,time.time(),quality,len(value))
+    
+    def _doReadBlock(self,blockName):
+        try:
+            self.debug_stream("Reading %s"%(blockName))
+            value = self._omega.getValue(blockName)
+            self.debug_stream("Answer received: %s"%(value))
+            if type(value) is float and isnan(value):
+                self.warn_stream("No answer received to %s block request"
+                                 %(blockName))
+                return None
+            return value
+        except Exception,e:
+            self.error_stream("Exception reading %s block: %s"%(blockName,e))
+            return None
     
     @AttrExc
     def write_expert_attr(self,attr):
@@ -401,7 +461,7 @@ class NewportOmega (PyTango.Device_4Impl):
                               %(self.Address))
             self._omega = None
             self._omega = Omega(self.Serial,self.Address,
-                                       logLevel=Logger.Debug,
+                                       logLevel=Logger.Info,
                                        statusCallback=self.statusCallback)
             # prepare the dynamic attributes for the requested measures
             self.debug_stream("Preparing the measures: %s"%(self.Measures))
@@ -410,6 +470,7 @@ class NewportOmega (PyTango.Device_4Impl):
                 self.addDynAttribute(measure)
             self._expertAttrs = {}
             self.addExpertDynAttributes()
+            self.addExpertBlockAttributes()
             #FIXME: remove
             self._fromStatusCallback = {}
             self.Open()
